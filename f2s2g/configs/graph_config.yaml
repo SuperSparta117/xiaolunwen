@@ -1,0 +1,26 @@
+# 异构图辅助边配置
+
+task_a:
+  edges:
+    same_district:
+      enabled: true
+      match_fields: ["区县", "街道"]
+    geo_near:
+      enabled: true
+      threshold_m: 500
+      lng_field: "经度"
+      lat_field: "纬度"
+    same_company:
+      enabled: true
+      match_fields: ["物业公司"]
+
+task_b:
+  edges:
+    same_district:
+      enabled: true
+      match_fields: ["区县", "街道"]
+    geo_near:
+      enabled: false          # 任务B无经纬度数据
+    same_company:
+      enabled: true
+      match_fields: ["管理单位"]

@@ -1,0 +1,31 @@
+# 任务A字段映射：物业处 ↔ 房屋交易中心
+
+source_a:
+  table_name: "物业处"
+  id_field: "village_id"
+  field_map:
+    区县: "area_name"
+    街道: "street_name"
+    小区名: "village_name"
+    物业类型: "property_type"
+    建筑面积: "building_area"
+    物业公司: "company_name"
+    经度: "lng"
+    纬度: "lat"
+
+source_b:
+  table_name: "房交中心"
+  id_field: "愉悦安"
+  field_map:
+    区县: "区县"
+    小区名: "小区名"
+    地址: "地址"
+    物业类型: "物业类型"
+    物业公司: "物业公司"
+    建设单位: "开发单位"
+    经度: null              # 需从"点位坐标"字段解析
+    纬度: null
+
+label_mapping:
+  source_a_id: "sql_village_id"
+  source_b_id: "csv_yuyue_id"
