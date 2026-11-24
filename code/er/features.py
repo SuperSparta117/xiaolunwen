@@ -7,6 +7,15 @@ from .geo_asset import _area_equivalent
 from .normalize import normalize_address, normalize_name, similarity, street_key
 
 
+def _admin_point(record: Mapping[str, object]) -> tuple[float, float] | None:
+    if not record.get("admin_resolved"):
+        return None
+    lng, lat = record.get("admin_lng"), record.get("admin_lat")
+    if lng is None or lat is None:
+        return None
+    return (float(lng), float(lat))
+
+
 def pair_features(query: Mapping[str, object], candidate: Mapping[str, object]) -> dict[str, float | int | None]:
     q_name, b_name = normalize_name(query.get("name")), normalize_name(candidate.get("name"))
     q_addr, b_addr = normalize_address(query.get("address")), normalize_address(candidate.get("address"))
@@ -16,6 +25,15 @@ def pair_features(query: Mapping[str, object], candidate: Mapping[str, object]) 
     distance = haversine_m(q_point, b_point)
     q_poi = q_point
     b_poi = b_point
+    # 行政中心：只在两侧都解析成功时计算，未解析保留 None（由 vector 显式编码，不静默当 0 米）。
+    admin_distance = haversine_m(_admin_point(query), _admin_point(candidate))
+    admin_same = int(
+        bool(
+            query.get("admin_unit_id")
+            and candidate.get("admin_unit_id")
+            and query.get("admin_unit_id") == candidate.get("admin_unit_id")
+        )
+    )
     return {
         "name_exact": int(bool(q_name and q_name == b_name)),
         "name_similarity": similarity(q_name, b_name),
@@ -32,4 +50,6 @@ def pair_features(query: Mapping[str, object], candidate: Mapping[str, object]) 
         "poi_distance_gt_1000m": int(distance is not None and distance >= 1000),
         "poi_district_match": int(_area_equivalent(query.get("poi_district"), candidate.get("poi_district"))),
         "type_match": int(bool(query.get("type") and query.get("type") == candidate.get("type"))),
+        "admin_center_distance_m": admin_distance,
+        "admin_center_same": admin_same,
     }

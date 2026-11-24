@@ -9,7 +9,7 @@ from typing import Iterable, Mapping
 
 from .config import ADMIN_PATH, POI_PATH
 from .geo import CHONGQING_BBOX, as_point, haversine_m
-from .normalize import clean, normalize_name
+from .normalize import clean, normalize_name, street_key
 
 TRUSTED_LEVELS = {"住宅区", "兴趣点", "门址", "门牌号", "单元", "商务大厦"}
 
@@ -134,6 +134,122 @@ def load_admin_asset(path: Path = ADMIN_PATH) -> tuple[dict[tuple[str, str], tup
     return indexed, {"asset": str(path), "sha256": _sha256(path), "rows": len(rows), "indexed_records": len(indexed)}
 
 
+_ADMIN_UNITS: list[dict[str, object]] | None = None
+_ADMIN_MANIFEST: dict[str, object] | None = None
+
+
+def _canonical_area_map(rows: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """等价区县族（两江/渝北/江北/北碚、双桥/大足、万盛/綦江等）的规范代表名。"""
+    areas = sorted({normalize_name(_text(row.get("区县"))) for row in rows if _text(row.get("区县"))})
+    parent = {area: area for area in areas}
+
+    def find(value: str) -> str:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    for index, left in enumerate(areas):
+        for right in areas[index + 1:]:
+            if _area_equivalent(left, right):
+                root_left, root_right = find(left), find(right)
+                if root_left != root_right:
+                    parent[max(root_left, root_right)] = min(root_left, root_right)
+    return {area: find(area) for area in areas}
+
+
+def admin_center_index() -> tuple[list[dict[str, object]], dict[str, object]]:
+    """加载并缓存行政中心索引。
+
+    `unit_id` 定义为「等价区县类 + 规范化行政原名」：等价区县族内同名重复行
+    （如双桥经开区/大足区 通桥街道）归为同一单元；`街道` 与 `镇` 保留原名差异。
+    """
+    global _ADMIN_UNITS, _ADMIN_MANIFEST
+    if _ADMIN_UNITS is not None and _ADMIN_MANIFEST is not None:
+        return _ADMIN_UNITS, _ADMIN_MANIFEST
+    rows = _read_csv(ADMIN_PATH)
+    canonical = _canonical_area_map(rows)
+    units: list[dict[str, object]] = []
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        area, name = _text(row.get("区县")), _text(row.get("行政区划"))
+        try:
+            center = (float(row["中心经度"]), float(row["中心纬度"]))
+        except (KeyError, ValueError):
+            continue
+        if not area or not name:
+            continue
+        unit_id = (canonical.get(normalize_name(area), normalize_name(area)), normalize_name(name))
+        unit = {
+            "area": area,
+            "area_key": normalize_name(area),
+            "name": name,
+            "name_key": normalize_name(name),
+            "stem_key": normalize_name(street_key(name)),
+            "unit_id": unit_id,
+            "center": center,
+        }
+        units.append(unit)
+        grouped[unit_id].append(unit)
+    duplicate_rows = {f"{uid[0]}|{uid[1]}": len(group) for uid, group in grouped.items() if len(group) > 1}
+    _ADMIN_UNITS = units
+    _ADMIN_MANIFEST = {
+        "asset": str(ADMIN_PATH),
+        "sha256": _sha256(ADMIN_PATH),
+        "rows": len(rows),
+        "indexed_units": len(grouped),
+        "duplicate_unit_rows": duplicate_rows,
+        "resolution_rules": [
+            "exact normalized (area, name), area-equivalence allowed",
+            "street_key suffix fallback inside equivalent areas",
+            "global street-name fallback only when unique",
+            "unit_id = (canonical equivalent-area class, normalized administrative name)",
+        ],
+    }
+    return _ADMIN_UNITS, _ADMIN_MANIFEST
+
+
+def reset_admin_center_cache() -> None:
+    global _ADMIN_UNITS, _ADMIN_MANIFEST
+    _ADMIN_UNITS = None
+    _ADMIN_MANIFEST = None
+
+
+def _pick_admin_unit(candidates: list[dict[str, object]], area: str) -> dict[str, object] | None:
+    exact_area = [unit for unit in candidates if unit["area_key"] == normalize_name(area)]
+    pool = exact_area or candidates
+    if len({unit["unit_id"] for unit in pool}) == 1:
+        return pool[0]
+    return None
+
+
+def resolve_admin_center(area: object, street: object) -> dict[str, object]:
+    """解析 (区县, 街道) 到行政中心单元。返回 center/unit_id/method/ambiguous。"""
+    area_text, street_text = _text(area), _text(street)
+    if not area_text or not street_text:
+        return {"center": None, "unit_id": None, "method": "missing_field", "ambiguous": False}
+    units, _ = admin_center_index()
+    name_key = normalize_name(street_text)
+    stem_key = normalize_name(street_key(street_text))
+    exact = [unit for unit in units if unit["name_key"] == name_key and _area_equivalent(area_text, unit["area"])]
+    if exact:
+        picked = _pick_admin_unit(exact, area_text)
+        if picked is None:
+            return {"center": None, "unit_id": None, "method": "exact_ambiguous", "ambiguous": True}
+        return {"center": picked["center"], "unit_id": picked["unit_id"], "method": "exact", "ambiguous": False}
+    suffix = [unit for unit in units if unit["stem_key"] == stem_key and _area_equivalent(area_text, unit["area"])]
+    if suffix:
+        picked = _pick_admin_unit(suffix, area_text)
+        if picked is None:
+            return {"center": None, "unit_id": None, "method": "suffix_ambiguous", "ambiguous": True}
+        return {"center": picked["center"], "unit_id": picked["unit_id"], "method": "suffix", "ambiguous": False}
+    global_matches = [unit for unit in units if unit["stem_key"] == stem_key]
+    if len({unit["unit_id"] for unit in global_matches}) == 1:
+        picked = global_matches[0]
+        return {"center": picked["center"], "unit_id": picked["unit_id"], "method": "global_unique", "ambiguous": False}
+    return {"center": None, "unit_id": None, "method": "unresolved", "ambiguous": bool(global_matches)}
+
+
 def attach_geo(row: Mapping[str, object], source: str, poi_index: Mapping[tuple[str, str], Mapping[str, object]]) -> dict[str, object]:
     result = dict(row)
     record_id = _text(row.get("id"))
@@ -146,6 +262,18 @@ def attach_geo(row: Mapping[str, object], source: str, poi_index: Mapping[tuple[
             result["street"] = poi["township"]
     else:
         result.update({"lng": None, "lat": None, "coords_trust": False, "coords_reason": "poi_not_found"})
+    # 行政中心解析：物业处只用业务 area+street；房交用高德区县+权威街道（township）。
+    admin_area = _text(result.get("poi_district")) if source == "transaction" else ""
+    admin = resolve_admin_center(admin_area or _text(result.get("area")), result.get("street"))
+    center = admin["center"]
+    result.update({
+        "admin_lng": center[0] if center else None,
+        "admin_lat": center[1] if center else None,
+        "admin_unit_id": admin["unit_id"],
+        "admin_resolved": bool(center),
+        "admin_resolution_method": admin["method"],
+        "admin_resolution_ambiguous": bool(admin["ambiguous"]),
+    })
     return result
 
 
@@ -153,6 +281,12 @@ def build_geo_manifest(output_dir: Path) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     poi_index, poi_manifest = load_poi_asset()
     admin_index, admin_manifest = load_admin_asset()
-    report = {"poi": poi_manifest, "admin": admin_manifest, "admin_index_keys": len(admin_index)}
+    _, admin_center_manifest = admin_center_index()
+    report = {
+        "poi": poi_manifest,
+        "admin": admin_manifest,
+        "admin_index_keys": len(admin_index),
+        "admin_center": admin_center_manifest,
+    }
     (output_dir / "geo_manifest.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report

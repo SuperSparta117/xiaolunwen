@@ -13,6 +13,7 @@ FEATURES = [
     "coords_available", "coords_trust_both", "poi_distance_m", "poi_distance_lt_100m",
     "poi_distance_100_300m", "poi_distance_300_1000m", "poi_distance_gt_1000m",
     "poi_district_match", "type_match",
+    "admin_center_distance_m", "admin_center_same",
 ]
 
 
@@ -42,16 +43,21 @@ def mask_rows(rows: list[dict[str, str]], ratio: float, seed: int = 42) -> list[
     return masked
 
 
-def vector(row: dict[str, str], *, use_poi: bool = True, use_text: bool = True) -> list[float]:
+def vector(row: dict[str, str], *, use_poi: bool = True, use_text: bool = True, use_admin_center: bool = True) -> list[float]:
     values = []
     for field in FEATURES:
-        if not use_poi and field.startswith("poi_") or not use_poi and field == "coords_trust_both":
+        if field in {"admin_center_distance_m", "admin_center_same"} and not use_admin_center:
+            values.append(0.0)
+        elif not use_poi and field.startswith("poi_") or not use_poi and field == "coords_trust_both":
             values.append(0.0)
         elif not use_text and field in {"name_exact", "name_similarity", "address_similarity", "street_match", "type_match"}:
             values.append(0.0)
         else:
             value = _float(row.get(field))
-            if field == "poi_distance_m":
+            if field == "admin_center_distance_m":
+                # -1 为显式“未解析”哨兵；其余按 2000 米截断到 0–10
+                value = -1.0 if value < 0 else min(value / 2000.0, 10.0)
+            elif field == "poi_distance_m":
                 value = min(value / 2000.0, 10.0) if value else 0.0
             values.append(value)
     return values
@@ -66,21 +72,21 @@ class LogisticModel:
     def __init__(self, dimension: int):
         self.weights = [0.0] * (dimension + 1)
 
-    def fit(self, rows: list[dict[str, str]], *, use_poi: bool = True, use_text: bool = True, epochs: int = 500, lr: float = 0.08) -> None:
+    def fit(self, rows: list[dict[str, str]], *, use_poi: bool = True, use_text: bool = True, use_admin_center: bool = True, epochs: int = 500, lr: float = 0.08) -> None:
         if not rows:
             return
         for _ in range(epochs):
             gradient = [0.0] * len(self.weights)
             for row in rows:
-                x = [1.0] + vector(row, use_poi=use_poi, use_text=use_text)
+                x = [1.0] + vector(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center)
                 error = sigmoid(sum(w * v for w, v in zip(self.weights, x))) - _float(row.get("label"))
                 for index, value in enumerate(x):
                     gradient[index] += error * value
             scale = lr / len(rows)
             self.weights = [w - scale * g for w, g in zip(self.weights, gradient)]
 
-    def predict(self, row: dict[str, str], *, use_poi: bool = True, use_text: bool = True) -> float:
-        x = [1.0] + vector(row, use_poi=use_poi, use_text=use_text)
+    def predict(self, row: dict[str, str], *, use_poi: bool = True, use_text: bool = True, use_admin_center: bool = True) -> float:
+        x = [1.0] + vector(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center)
         return sigmoid(sum(w * v for w, v in zip(self.weights, x)))
 
 
@@ -143,20 +149,20 @@ def choose_threshold(rows: list[dict[str, object]]) -> float:
     return best[0]
 
 
-def evaluate_model(name: str, train: list[dict[str, str]], validation: list[dict[str, str]], test: list[dict[str, str]], *, use_poi: bool, use_text: bool, rule: str | None = None, model_type: str = "logistic", model_output_dir: Path | None = None) -> dict[str, object]:
+def evaluate_model(name: str, train: list[dict[str, str]], validation: list[dict[str, str]], test: list[dict[str, str]], *, use_poi: bool, use_text: bool, use_admin_center: bool = True, rule: str | None = None, model_type: str = "logistic", model_output_dir: Path | None = None) -> dict[str, object]:
     model = None
     if rule:
         scorer = lambda row: rule_probability(row, rule)
         calibration = "validation_f1_threshold"
     elif model_type == "lightgbm":
         from .lightgbm_model import train_lightgbm
-        model = train_lightgbm(train, validation, FEATURES, use_poi=use_poi, use_text=use_text)
-        scorer = lambda row: float(model.predict_proba([vector(row, use_poi=use_poi, use_text=use_text)])[0][1])
+        model = train_lightgbm(train, validation, FEATURES, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center)
+        scorer = lambda row: float(model.predict_proba([vector(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center)])[0][1])
         calibration = "lightgbm_raw"
     else:
         model = LogisticModel(len(FEATURES))
-        model.fit(train, use_poi=use_poi, use_text=use_text, epochs=160)
-        scorer = lambda row: model.predict(row, use_poi=use_poi, use_text=use_text)
+        model.fit(train, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center, epochs=160)
+        scorer = lambda row: model.predict(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center)
         calibration = "logistic_raw"
     validation_scored = [{**row, "probability": scorer(row)} for row in validation]
     threshold = choose_threshold(validation_scored)
@@ -181,23 +187,23 @@ def run_experiments(data_dir: Path, output_dir: Path, *, mask_ratio: float = 0.6
         evaluate_model("主字段精确匹配", train, validation, test, use_poi=False, use_text=True, rule="exact"),
         evaluate_model("TF-IDF-like Cosine", train, validation, test, use_poi=False, use_text=True, rule="tfidf_like"),
         evaluate_model("Text/Structure Rule", train, validation, test, use_poi=False, use_text=True, rule="text_structure"),
-        evaluate_model("Logistic Text/Structure", train, validation, test, use_poi=False, use_text=True),
-        evaluate_model("LightGBM Text/Structure", train, validation, test, use_poi=False, use_text=True, model_type="lightgbm", model_output_dir=output_dir),
-        evaluate_model("LightGBM + POI", train, validation, test, use_poi=True, use_text=True, model_type="lightgbm", model_output_dir=output_dir),
-        evaluate_model("Full Model", train, validation, test, use_poi=True, use_text=True, model_type="lightgbm", model_output_dir=output_dir),
+        evaluate_model("Logistic Text/Structure", train, validation, test, use_poi=False, use_text=True, use_admin_center=False),
+        evaluate_model("LightGBM Text/Structure", train, validation, test, use_poi=False, use_text=True, use_admin_center=False, model_type="lightgbm", model_output_dir=output_dir),
+        evaluate_model("LightGBM + POI", train, validation, test, use_poi=True, use_text=True, use_admin_center=False, model_type="lightgbm", model_output_dir=output_dir),
+        evaluate_model("Full Model", train, validation, test, use_poi=True, use_text=True, use_admin_center=True, model_type="lightgbm", model_output_dir=output_dir),
     ]
     fields = sorted({key for result in results for key in result})
     with (output_dir / "main_comparison.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(results)
     ablations = []
-    for name, use_poi, use_text in [
-        ("Full Model LightGBM", True, True),
-        ("E1 remove admin", True, True),
-        ("E2 remove POI", False, True),
-        ("E3 text structure only", False, True),
-        ("E4a 结构+行政-only", False, False),
+    for name, use_poi, use_text, use_admin_center in [
+        ("Full Model LightGBM", True, True, True),
+        ("E1 remove admin center", True, True, False),
+        ("E2 remove POI", False, True, False),
+        ("E3 text structure only", False, True, False),
+        ("E4a 结构+行政-only", False, False, False),
     ]:
-        ablations.append(evaluate_model(name, train, validation, test, use_poi=use_poi, use_text=use_text, model_type="lightgbm", model_output_dir=output_dir))
+        ablations.append(evaluate_model(name, train, validation, test, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center, model_type="lightgbm", model_output_dir=output_dir))
     fields = sorted({key for result in ablations for key in result})
     with (output_dir / "ablation.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(ablations)

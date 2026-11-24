@@ -19,6 +19,7 @@ def train_lightgbm(
     *,
     use_poi: bool = True,
     use_text: bool = True,
+    use_admin_center: bool = True,
     seed: int = 42,
 ) -> NativeLightGBMModel:
     """Train LightGBM through its native API, without requiring scikit-learn."""
@@ -33,9 +34,9 @@ def train_lightgbm(
     from .experiments import _float, vector
 
     import numpy as np
-    x_train = np.asarray([vector(row, use_poi=use_poi, use_text=use_text) for row in train_rows], dtype=float)
+    x_train = np.asarray([vector(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center) for row in train_rows], dtype=float)
     y_train = np.asarray([_float(row.get("label")) for row in train_rows], dtype=float)
-    x_valid = np.asarray([vector(row, use_poi=use_poi, use_text=use_text) for row in validation_rows], dtype=float)
+    x_valid = np.asarray([vector(row, use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center) for row in validation_rows], dtype=float)
     y_valid = np.asarray([_float(row.get("label")) for row in validation_rows], dtype=float)
     if x_train.ndim != 2 or x_valid.ndim != 2:
         raise ValueError(f"LightGBM matrix shape invalid: train={x_train.shape}, validation={x_valid.shape}")

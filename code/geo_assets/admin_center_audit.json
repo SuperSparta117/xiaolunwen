@@ -1,0 +1,212 @@
+{
+  "asset": {
+    "asset": "C:\\Users\\liuming\\Documents\\MyVscodeProject\\xiaolunwen\\数据\\外源数据\\asset2_admin_geo.csv",
+    "sha256": "4a2f1dc75ab428da5cfca7335b5a03dd7a9b9ead540c24ae1556dc4568321758",
+    "rows": 1094,
+    "indexed_units": 1034,
+    "duplicate_unit_rows": {
+      "两江新区|兴隆镇": 2,
+      "两江新区|统景镇": 2,
+      "双桥经开区|国梁镇": 2,
+      "双桥经开区|金山镇": 2,
+      "双桥经开区|龙水镇": 2,
+      "双桥经开区|高升镇": 2,
+      "双桥经开区|宝兴镇": 2,
+      "双桥经开区|石马镇": 2,
+      "双桥经开区|铁山镇": 2,
+      "双桥经开区|宝顶镇": 2,
+      "双桥经开区|龙石镇": 2,
+      "双桥经开区|中敖镇": 2,
+      "双桥经开区|高坪镇": 2,
+      "双桥经开区|季家镇": 2,
+      "双桥经开区|万古镇": 2,
+      "双桥经开区|珠溪镇": 2,
+      "双桥经开区|三驱镇": 2,
+      "双桥经开区|雍溪镇": 2,
+      "双桥经开区|古龙镇": 2,
+      "双桥经开区|智凤街道": 2,
+      "双桥经开区|棠香街道": 2,
+      "双桥经开区|龙岗街道": 2,
+      "双桥经开区|回龙镇": 2,
+      "双桥经开区|拾万镇": 2,
+      "双桥经开区|邮亭镇": 2,
+      "双桥经开区|玉龙镇": 2,
+      "双桥经开区|龙滩子街道": 2,
+      "双桥经开区|双路街道": 2,
+      "双桥经开区|通桥街道": 2,
+      "万盛经开区|三江街道": 2,
+      "万盛经开区|青年镇": 2,
+      "万盛经开区|打通镇": 2,
+      "万盛经开区|石壕镇": 2,
+      "万盛经开区|篆塘镇": 2,
+      "万盛经开区|丁山镇": 2,
+      "万盛经开区|扶欢镇": 2,
+      "万盛经开区|万盛街道": 2,
+      "万盛经开区|东林街道": 2,
+      "万盛经开区|关坝镇": 2,
+      "万盛经开区|万东镇": 2,
+      "万盛经开区|金桥镇": 2,
+      "万盛经开区|安稳镇": 2,
+      "万盛经开区|赶水镇": 2,
+      "万盛经开区|东溪镇": 2,
+      "万盛经开区|中峰镇": 2,
+      "万盛经开区|郭扶镇": 2,
+      "万盛经开区|古南街道": 2,
+      "万盛经开区|永新镇": 2,
+      "万盛经开区|新盛街道": 2,
+      "万盛经开区|文龙街道": 2,
+      "万盛经开区|隆盛镇": 2,
+      "万盛经开区|永城镇": 2,
+      "万盛经开区|南桐镇": 2,
+      "万盛经开区|石林镇": 2,
+      "万盛经开区|通惠街道": 2,
+      "万盛经开区|石角镇": 2,
+      "万盛经开区|三角镇": 2,
+      "万盛经开区|横山镇": 2,
+      "万盛经开区|丛林镇": 2,
+      "万盛经开区|黑山镇": 2
+    },
+    "resolution_rules": [
+      "exact normalized (area, name), area-equivalence allowed",
+      "street_key suffix fallback inside equivalent areas",
+      "global street-name fallback only when unique",
+      "unit_id = (canonical equivalent-area class, normalized administrative name)"
+    ]
+  },
+  "query_side": {
+    "total": 8782,
+    "resolved": 8780,
+    "resolved_rate": 0.9998,
+    "methods": {
+      "exact": 8764,
+      "suffix": 16,
+      "unresolved": 2
+    },
+    "ambiguous": 0,
+    "unresolved_samples": [
+      {
+        "id": "1715271418735726593",
+        "area": "二期",
+        "street": "潼南区"
+      },
+      {
+        "id": "1904053736139808770",
+        "area": "蔬菜公司大河沟集资楼",
+        "street": "沙坪坝区"
+      }
+    ],
+    "center_lng_range": [
+      105.321508,
+      109.971381
+    ],
+    "center_lat_range": [
+      28.351756,
+      31.956008
+    ]
+  },
+  "candidate_side": {
+    "total": 3260,
+    "resolved": 3260,
+    "resolved_rate": 1.0,
+    "methods": {
+      "exact": 3260
+    },
+    "ambiguous": 0,
+    "unresolved_samples": [],
+    "center_lng_range": [
+      105.321508,
+      109.971381
+    ],
+    "center_lat_range": [
+      28.351756,
+      31.956008
+    ]
+  },
+  "query_center_unresolved_examples": [
+    {
+      "id": "1715271418735726593",
+      "area": "二期",
+      "street": "潼南区"
+    },
+    {
+      "id": "1904053736139808770",
+      "area": "蔬菜公司大河沟集资楼",
+      "street": "沙坪坝区"
+    }
+  ],
+  "candidate_district_conflicts": {
+    "count": 9,
+    "samples": [
+      {
+        "id": "163b02c1c7fa92f3e1f8c6ab9523809c",
+        "area": "九龙坡区",
+        "poi_district": "大渡口区"
+      },
+      {
+        "id": "5bd3e1eb905dffd4395d309253cb16b7",
+        "area": "渝北区",
+        "poi_district": "北碚区"
+      },
+      {
+        "id": "661648bb11e375933bd18a726ef51e5a",
+        "area": "大足区",
+        "poi_district": "永川区"
+      },
+      {
+        "id": "88eb7b154fd61eade0b058a92d78afda",
+        "area": "巴南区",
+        "poi_district": "两江新区"
+      },
+      {
+        "id": "90172ad30651ec6bb10b516360f52100",
+        "area": "丰都县",
+        "poi_district": "涪陵区"
+      },
+      {
+        "id": "97a6909b0ffe44f5bae67be06746ede9",
+        "area": "綦江区",
+        "poi_district": "南岸区"
+      },
+      {
+        "id": "a15107de1889aa2dacd22b7763d45647",
+        "area": "梁平区",
+        "poi_district": "万州区"
+      },
+      {
+        "id": "b1a28144d7ed87d3941ad08de826c8ed",
+        "area": "南岸区",
+        "poi_district": "渝中区"
+      },
+      {
+        "id": "e0a616e7fed45597ba52287ee87bbd49",
+        "area": "永川区",
+        "poi_district": "九龙坡区"
+      }
+    ]
+  },
+  "candidate_district_missing": {
+    "count": 21,
+    "samples": [
+      "150f5f21d535e53ad92d568a6cb220d6",
+      "1ce4d43a9779333a2d6ce39f08cd84ad",
+      "2c901d9f93d3ea670193d8e50ece2060",
+      "2c901da293dd248c0193e2f5f642104e",
+      "2c901da493dd25520193f2b290062060",
+      "2c901da593d403700193d9601a3325d8",
+      "2c901da593dc9cde0193f88f72a231b8",
+      "2c901da693dc9d080194012ac8ea4350",
+      "5e71bceaacbfcf03076ce22e12dfa434",
+      "60741ec80de2f49e7394e411b77dc99e",
+      "6a3fe44d46d4f40a7db837c4542e3368",
+      "7be1d3a535eaf4f15d5baf1075372f11",
+      "87d6d91f4f75ba26e63f98019400a9cf",
+      "95f1cca5e94f9423f7e1be9dae140b2b",
+      "96ba4083a1f4cda23031013a7547819e",
+      "9ae596f2aa4ba5036fd1a9e44417ba68",
+      "afc1fdaa4ea0f970e18cddfdd50ea374",
+      "da21ab53db9a833a307c0d166b8b8dba",
+      "e0aa2eaacb44c8a26f6a48759af2536a",
+      "e19c2483b058df73a1467bc6dc9ec569"
+    ]
+  }
+}

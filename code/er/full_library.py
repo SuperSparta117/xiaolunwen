@@ -56,6 +56,30 @@ def _distance(q: Mapping[str, object], candidate: Mapping[str, object]) -> float
     return 6_371_000 * 2 * math.asin(math.sqrt(haversine))
 
 
+def _admin_point(record: Mapping[str, object]) -> tuple[float, float] | None:
+    if not record.get("admin_resolved"):
+        return None
+    lng, lat = record.get("admin_lng"), record.get("admin_lat")
+    if lng is None or lat is None:
+        return None
+    return (float(lng), float(lat))
+
+
+def _point_distance(left: tuple[float, float] | None, right: tuple[float, float] | None) -> float | None:
+    if left is None or right is None:
+        return None
+    lng1, lat1 = left
+    lng2, lat2 = right
+    radians = math.pi / 180
+    dlat = (lat2 - lat1) * radians
+    dlng = (lng2 - lng1) * radians
+    haversine = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1 * radians) * math.cos(lat2 * radians) * math.sin(dlng / 2) ** 2
+    )
+    return 6_371_000 * 2 * math.asin(math.sqrt(haversine))
+
+
 def record_features(
     query: Mapping[str, object],
     candidate: Mapping[str, object],
@@ -65,6 +89,7 @@ def record_features(
     use_poi: bool,
     use_admin: bool,
     use_text: bool = True,
+    use_admin_center: bool = True,
 ) -> dict[str, float]:
     from .normalize import normalize_address, normalize_name, similarity, street_key
 
@@ -80,6 +105,15 @@ def record_features(
     name_similarity = similarity(query_name, candidate_name) if query_name and candidate_name else 0.0
     name_exact = int(bool(query_name and query_name == candidate_name))
     distance = _distance(query, candidate) if use_poi else None
+    admin_distance = _point_distance(_admin_point(query), _admin_point(candidate)) if use_admin_center else None
+    admin_same = int(
+        bool(
+            use_admin_center
+            and query.get("admin_unit_id")
+            and candidate.get("admin_unit_id")
+            and query.get("admin_unit_id") == candidate.get("admin_unit_id")
+        )
+    )
     return {
         "name_exact": name_exact,
         "name_similarity": name_similarity,
@@ -95,15 +129,17 @@ def record_features(
         "poi_distance_gt_1000m": int(distance is not None and distance >= 1000),
         "poi_district_match": int(bool(use_poi) and _area_equivalent(query.get("poi_district"), candidate.get("poi_district"))),
         "type_match": int(bool(query.get("type") and query.get("type") == candidate.get("type"))),
-        "admin_center_distance_m": 0.0,
+        "admin_center_distance_m": admin_distance if admin_distance is not None else -1.0,
+        "admin_center_same": admin_same,
     }
 
 
-def _feature_vector(query, candidate, *, rho: float, seed: int, use_poi: bool, use_admin: bool, use_text: bool):
+def _feature_vector(query, candidate, *, rho: float, seed: int, use_poi: bool, use_admin: bool, use_text: bool, use_admin_center: bool = True):
     features = record_features(
-        query, candidate, rho=rho, seed=seed, use_poi=use_poi, use_admin=use_admin, use_text=use_text
+        query, candidate, rho=rho, seed=seed, use_poi=use_poi, use_admin=use_admin, use_text=use_text,
+        use_admin_center=use_admin_center,
     )
-    return vector({key: str(value) for key, value in features.items()})
+    return vector({key: str(value) for key, value in features.items()}, use_admin_center=use_admin_center)
 
 
 def _model_probability(model, feature_matrix: list[list[float]]) -> list[float]:
@@ -143,6 +179,7 @@ def _score_full_candidate_library(
     use_poi: bool,
     use_admin: bool,
     use_text: bool,
+    use_admin_center: bool,
     rule: str | None,
     batch_size: int,
 ) -> None:
@@ -156,7 +193,7 @@ def _score_full_candidate_library(
             feature_batch = [
                 _feature_vector(
                     query, candidate, rho=rho, seed=seed, use_poi=use_poi,
-                    use_admin=use_admin, use_text=use_text,
+                    use_admin=use_admin, use_text=use_text, use_admin_center=use_admin_center,
                 )
                 for candidate in candidate_batch
             ]
@@ -324,13 +361,14 @@ def run_full_library(
         fingerprint.update(path.read_bytes() if path.exists() else b"<missing>")
     data_fingerprint = fingerprint.hexdigest()
     methods = [
-        ("主字段精确匹配", False, False, True, "exact"),
-        ("TF-IDF-like Cosine", False, False, True, "tfidf"),
-        ("LightGBM Text/Structure", False, True, True, None),
-        ("LightGBM + POI", True, True, True, None),
-        ("Full Model", True, True, True, None),
-        ("E2 remove POI", False, True, True, None),
-        ("E4b 全特征关闭", False, False, False, None),
+        ("主字段精确匹配", False, False, True, False, "exact"),
+        ("TF-IDF-like Cosine", False, False, True, False, "tfidf"),
+        ("LightGBM Text/Structure", False, True, True, False, None),
+        ("LightGBM + POI", True, True, True, False, None),
+        ("Full Model", True, True, True, True, None),
+        ("E1 remove admin center", True, True, True, False, None),
+        ("E2 remove POI", False, True, True, False, None),
+        ("E4b 全特征关闭", False, False, False, False, None),
     ]
 
     summary_path = output_dir / "full_candidate_comparison.csv"
@@ -351,7 +389,7 @@ def run_full_library(
                 )
                 masked_validation.append({**row, "name_exact": "0" if masked else row["name_exact"], "name_similarity": "0" if masked else row["name_similarity"]})
 
-            for method, use_poi, use_admin, use_text, rule in methods:
+            for method, use_poi, use_admin, use_text, use_admin_center, rule in methods:
                 run_dir = prepare_run(cache_root, rho, method, seed, split_seed)
                 model_train = masked_train
                 model_validation = masked_validation
@@ -359,7 +397,8 @@ def run_full_library(
                     model_train = [{**row, "name_exact": "0", "name_similarity": "0"} for row in masked_train]
                     model_validation = [{**row, "name_exact": "0", "name_similarity": "0"} for row in masked_validation]
                 model = train_lightgbm(
-                    model_train, model_validation, FEATURES, use_poi=use_poi, use_text=use_text, seed=seed
+                    model_train, model_validation, FEATURES,
+                    use_poi=use_poi, use_text=use_text, use_admin_center=use_admin_center, seed=seed,
                 ) if rule is None else None
 
                 for split_name, query_ids in (("validation", validation_ids), ("test", test_ids)):
@@ -389,6 +428,7 @@ def run_full_library(
                             use_poi=use_poi,
                             use_admin=use_admin,
                             use_text=use_text,
+                            use_admin_center=use_admin_center,
                             rule=rule,
                             batch_size=score_batch_size,
                         )

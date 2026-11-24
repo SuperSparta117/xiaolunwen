@@ -1,0 +1,58 @@
+{
+  "source": "training_assets_full_v4",
+  "stratified": {
+    "area=0,street=0": {
+      "pairs": 2359,
+      "positive": 7,
+      "negative": 2352,
+      "distance_auc": 0.38903061224489793,
+      "distance_ks": 0.37032312925170063,
+      "distance_median_positive": 64133.67661988647,
+      "distance_median_negative": 89192.1197557548,
+      "same_ratio_positive": 0.0,
+      "same_ratio_negative": 0.0
+    },
+    "area=0,street=1": {
+      "pairs": 58,
+      "positive": 25,
+      "negative": 33,
+      "distance_auc": 0.5,
+      "distance_ks": 0.0,
+      "distance_median_positive": 0.0,
+      "distance_median_negative": 0.0,
+      "same_ratio_positive": 1.0,
+      "same_ratio_negative": 1.0
+    },
+    "area=1,street=0": {
+      "pairs": 2183,
+      "positive": 192,
+      "negative": 1991,
+      "distance_auc": 0.5321093357609241,
+      "distance_ks": 0.11345063201071492,
+      "distance_median_positive": 7562.517276791623,
+      "distance_median_negative": 7562.517276791623,
+      "same_ratio_positive": 0.0,
+      "same_ratio_negative": 0.0
+    },
+    "area=1,street=1": {
+      "pairs": 7473,
+      "positive": 2801,
+      "negative": 4672,
+      "distance_auc": 0.49964359597599683,
+      "distance_ks": 0.0007131901277919184,
+      "distance_median_positive": 0.0,
+      "distance_median_negative": 0.0,
+      "same_ratio_positive": 1.0,
+      "same_ratio_negative": 0.998929794520548
+    }
+  },
+  "overall": {
+    "distance_auc": 0.2863269175965101,
+    "distance_ks": 0.4144324849654003
+  },
+  "coverage": {
+    "pairs": 12077,
+    "both_resolved": 12073,
+    "both_resolved_rate": 0.9997
+  }
+}

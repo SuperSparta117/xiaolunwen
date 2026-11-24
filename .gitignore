@@ -4,7 +4,10 @@ code/_smoke/
 code/sample_output/
 code/full_library_results_disk/
 code/full_library_results_disk_v4/
+code/full_library_results_disk_v5/
 code/pair_model_results/
+code/pair_model_results_v5/
+code/pair_model_results_v5_sensitivity/
 
 # Python
 __pycache__/

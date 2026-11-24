@@ -52,6 +52,40 @@ class TestCore(unittest.TestCase):
         self.assertEqual(pair_features(query, different)["street_match"], 0)
         self.assertEqual(pair_features(query, {**cand, "street": ""})["street_match"], 0)
 
+    def test_admin_center_features(self):
+        query = {
+            "id": "q", "name": "某小区", "area": "北碚区", "street": "蔡家岗街道",
+            "poi_district": "两江新区", "address": "",
+            "admin_resolved": True, "admin_lng": 106.5, "admin_lat": 29.5,
+            "admin_unit_id": ("北碚区", "蔡家岗街道"),
+        }
+        same = {**query, "id": "b"}
+        features = pair_features(query, same)
+        self.assertEqual(features["admin_center_same"], 1)
+        self.assertEqual(features["admin_center_distance_m"], 0.0)
+
+        other = {**query, "id": "c", "admin_lng": 106.6, "admin_lat": 29.6, "admin_unit_id": ("北碚区", "水土街道")}
+        moved = pair_features(query, other)
+        self.assertEqual(moved["admin_center_same"], 0)
+        self.assertGreater(moved["admin_center_distance_m"], 0)
+
+        unresolved = {**query, "id": "d", "admin_resolved": False}
+        self.assertIsNone(pair_features(query, unresolved)["admin_center_distance_m"])
+
+    def test_admin_center_vector_switch(self):
+        from er.experiments import FEATURES, vector
+
+        self.assertEqual(len(FEATURES), 16)
+        row = {name: "0" for name in FEATURES}
+        row.update({"area_match": "1", "street_match": "1", "admin_center_distance_m": "4000", "admin_center_same": "1"})
+        with_admin = vector(row, use_admin_center=True)
+        without_admin = vector(row, use_admin_center=False)
+        self.assertEqual(len(with_admin), 16)
+        self.assertEqual(with_admin[-2:], [2.0, 1.0])
+        self.assertEqual(without_admin[-2:], [0.0, 0.0])
+        # 关闭行政中心只影响两维，不动 area_match / street_match
+        self.assertEqual(without_admin[3:5], [1.0, 1.0])
+
     def test_set_threshold(self):
         rows = [{"candidate_id": "a", "probability": 0.8}, {"candidate_id": "b", "probability": 0.2}]
         self.assertEqual([r["candidate_id"] for r in predict_set(rows, 0.72)], ["a"])

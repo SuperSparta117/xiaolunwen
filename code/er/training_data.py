@@ -9,7 +9,7 @@ from typing import Iterable, Mapping
 
 from .config import A_CANDIDATE_PATH, A_QUERY_PATH, MAPPING_PATH, POI_PATH
 from .features import pair_features
-from .geo_asset import attach_geo, load_poi_asset
+from .geo_asset import admin_center_index, attach_geo, load_poi_asset
 from .io import read_csv_sample, read_sql_sample, standardize_property, standardize_transaction
 from .poi_candidate import GeoCandidateIndex
 
@@ -20,6 +20,7 @@ FEATURE_FIELDS = [
     "coords_available", "coords_trust_both", "poi_distance_m", "poi_distance_lt_100m",
     "poi_distance_100_300m", "poi_distance_300_1000m", "poi_distance_gt_1000m",
     "poi_district_match", "type_match",
+    "admin_center_distance_m", "admin_center_same",
 ]
 
 
@@ -140,6 +141,58 @@ def build_pair_feature_assets(
             })
             negative_counts[split] += 1
 
+    unresolved_admin = [row for row in feature_rows if row.get("admin_center_distance_m") is None]
+    for row in unresolved_admin:
+        # 显式缺失编码：-1 表示“未解析”，禁止静默编码成 0 米
+        row["admin_center_distance_m"] = -1.0
+        row["admin_center_same"] = 0
+
+    seed_ids: set[str] = set()
+    regeo_path = POI_PATH.parent / "regeo_fangjiao.jsonl"
+    if regeo_path.exists():
+        for line in regeo_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if item.get("source") == "seed":
+                seed_ids.add(str(item.get("record_id", "")))
+
+    def _median(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return round(ordered[len(ordered) // 2], 1)
+
+    admin_stats: dict[str, object] = {}
+    external_overlap: dict[str, object] = {}
+    for split in ("train", "validation", "test"):
+        rows = [row for row in feature_rows if row.get("split") == split]
+        distances = [
+            float(row["admin_center_distance_m"])
+            for row in rows
+            if row.get("admin_center_distance_m") is not None and float(row["admin_center_distance_m"]) >= 0
+        ]
+        positive = [row for row in rows if int(row.get("label", 0)) == 1]
+        negative = [row for row in rows if int(row.get("label", 0)) == 0]
+        admin_stats[split] = {
+            "pairs": len(rows),
+            "resolved": len(distances),
+            "unresolved": len(rows) - len(distances),
+            "resolved_rate": round(len(distances) / len(rows), 4) if rows else 0.0,
+            "same_ratio_positive": round(sum(int(row.get("admin_center_same", 0)) for row in positive) / len(positive), 4) if positive else None,
+            "same_ratio_negative": round(sum(int(row.get("admin_center_same", 0)) for row in negative) / len(negative), 4) if negative else None,
+            "distance_m_median_positive": _median([float(row["admin_center_distance_m"]) for row in positive]),
+            "distance_m_median_negative": _median([float(row["admin_center_distance_m"]) for row in negative]),
+        }
+        overlap = [row for row in rows if str(row.get("candidate_id")) in seed_ids]
+        external_overlap[split] = {
+            "pairs": len(overlap),
+            "positive": sum(1 for row in overlap if int(row.get("label", 0)) == 1),
+            "negative": sum(1 for row in overlap if int(row.get("label", 0)) == 0),
+        }
+
+    _, admin_center_manifest = admin_center_index()
+
     output_files = {}
     for split in ("train", "validation", "test"):
         rows = [row for row in feature_rows if row.get("split") == split]
@@ -154,6 +207,23 @@ def build_pair_feature_assets(
         "poi": poi_manifest, "positive_pairs": len(positives),
         "negative_pairs_by_split": dict(negative_counts), "split_files": output_files,
         "feature_fields": FEATURE_FIELDS,
+        "admin_center": {
+            "feature": True,
+            "asset": admin_center_manifest["asset"],
+            "sha256": admin_center_manifest["sha256"],
+            "rows": admin_center_manifest["rows"],
+            "indexed_units": admin_center_manifest["indexed_units"],
+            "duplicate_unit_groups": len(admin_center_manifest["duplicate_unit_rows"]),
+            "resolution_rules": admin_center_manifest["resolution_rules"],
+            "unresolved_pairs": len(unresolved_admin),
+            "missing_encoding": {"admin_center_distance_m": -1.0, "admin_center_same": 0},
+            "stats_by_split": admin_stats,
+        },
+        "external_used_for_label_review": {
+            "source_file": str(regeo_path),
+            "seed_responses": len(seed_ids),
+            "pair_overlap_by_split": external_overlap,
+        },
         "feature_policy": {
             "POI_distance_only_when_both_coordinates_trusted": True,
             "unknown_queries_used_as_negatives": False,
@@ -162,6 +232,9 @@ def build_pair_feature_assets(
             "area_match_uses_alias_equivalence": True,
             "poi_district_match_uses_alias_equivalence": True,
             "street_match_uses_administrative_street": True,
+            "admin_center_feature": True,
+            "admin_center_unit_identity": "(equivalent area class, normalized administrative name)",
+            "admin_center_only_when_both_resolved": True,
             "street_source": {
                 "property": "业务字段 street_name",
                 "transaction": "POI 资产 乡镇街道（逆地理编码 township）",
