@@ -330,7 +330,7 @@ def run_full_library(
         ("LightGBM + POI", True, True, True, None),
         ("Full Model", True, True, True, None),
         ("E2 remove POI", False, True, True, None),
-        ("E4 structure-only", False, False, False, None),
+        ("E4b 全特征关闭", False, False, False, None),
     ]
 
     summary_path = output_dir / "full_candidate_comparison.csv"

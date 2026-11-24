@@ -1,4 +1,4 @@
-# 主实验计划：跨源物理地点实体解析与拒识
+# 主实验计划与结果：跨源物理地点实体解析与拒识
 
 ## 1 研究目标
 
@@ -30,27 +30,169 @@
 
 三个阶段分别评估。候选没有被召回属于候选生成失败，不能混同为排序模型失败。
 
+围绕这三个阶段，本文报告两个独立实验，分别评估、不合并总分：
+
+| 实验 | 评估对象 | 输出口径 | 章节 |
+|---|---|---|---|
+| 实验一 | 每个 test query × 全部 3,260 个候选 | 按 validation 阈值输出集合 | §4 |
+| 实验二 | 1,835 个构造 pair（460 正 / 1,375 负） | 逐对二分类 | §5 |
+
+两者口径不同（集合输出 vs 成对二分类），指标不可合并或横向比较；实验二只用于诊断名称遮蔽下的成对判别与 POI 增量，不作为最终实体解析主结果。
+
 ### 1.4 论文主张边界
 
 论文主张限定为：在给定候选库、字段映射和外源地理资产的条件下，建立一个能够融合多源证据、处理字段缺失和冲突、对新记录进行推理，并在候选侧不存在对应地点时拒识的跨源物理地点实体解析方法。
 
 本文不声称解决任意城市、任意业务表的通用地点解析；所有结论限定在数据字段、空间范围、候选库和外源资产条件内。
 
-## 2 已核实的数据事实
+## 2 数据事实与评测集
 
-> 以下事实来自当前数据核查，是实验设计依据。数字发生变化时，必须先更新数据版本和本计划中的核算表。
+### 2.1 已核实的数据事实
+
+> 以下事实来自当前数据核查，是实验设计依据。数字发生变化时，必须先更新数据版本和本节核算。
 
 | 项目 | 事实 | 实验影响 |
 |---|---|---|
 | 规模 | A：物业处 8,782 / 房交处 3,260；B：征收处 28,101 / 奥格 28,101 | A、B 是同级评测任务；候选侧规模是主要计算约束 |
+| A 关系形态 | 非 1:1；query 侧最多 5 个 pair，平均 1.05 pair/query | 必须按集合输出，不能假设一对一 |
 | A 金标准 | 3,026 个 pair，覆盖 2,883 个 query；其中 2,709 个原始标注 pair、317 个外源补全 pair | pair 和 query 必须分开计数；按 provenance 分层报告 |
+| A 标签核算 | 已确认正例 2,822 个 query / 2,965 个 pair，其中正例坐标不可用 61 个 pair | 恒等式：`2,965 + 61 = 3,026` 个 pair；`2,883 + 5,899 = 8,782` 个 query |
+| A mapping 覆盖 | 8,782 个 query 中 2,883 个在 mapping、5,899 个未覆盖；未覆盖中负例坐标不可用 216、近处待核验 215、同名未配对 156 | 未覆盖不等于空集；未核验样本保持 `unknown`，不得直接作为拒识负例 |
 | A 名称一致率 | 3,014 / 3,026 = 99.6%（pair 级） | 自然正例存在名称捷径，必须加入同名异地和名称遮蔽切片 |
 | A 名称变体 | 15 条（0.5%） | 自然数据中的异名样本不足，不能单凭自然集声称异名解析能力 |
 | A 已复核错误 | 878 条可疑对逐条复核，已知标注错误 0 条 | 主要风险是金标准不完整和证据来源混合，不是已知错标 |
 | 坐标系 | 房交原始面坐标为 CGCS2000/WGS84；POI 坐标为 GCJ-02 | 距离计算前必须完成坐标转换并记录版本 |
-| B 字段同值率 | 主要同行字段高度同值；地址同行相等率 100%，房屋用途为 97.3021%；`id`、奥格编号和地址均存在重复 | B 与 A 同级评测但单独报告；不得使用行号、编号或同行关系作为实体键 |
-| A mapping 覆盖 | 物业处 8,782 条 query 中，2,883 条出现在当前 mapping，5,899 条未被 mapping 覆盖 | 未覆盖不等于空集；未核验样本保持 `unknown`，不得直接作为拒识负例 |
+| B 字段同值率 | 主要同行字段高度同值；地址同行相等率 100%，房屋用途为 97.3021%；`id`、奥格编号和地址均存在重复；原始数据无天然空集 | B 与 A 同级评测但单独报告；不得使用行号、编号或同行关系作为实体键；空集需按固定协议构造 |
 
+### 2.2 版本化数据资产
+
+实验开始前冻结并版本化：
+
+- `gold_pairs`：pair 级金标准；
+- `gold_sets`：每个 query 的完整 `G(q)`；
+- `evaluation_queries`：全量 query 及标签状态；
+- `candidate_pool`：完整候选池及版本；
+- `split_manifest`：实体簇与 train/validation/test 划分；
+- `mask_manifest`：遮蔽比例、query、seed 和派生字段处理；
+- `feature_manifest`：字段白名单、黑名单和特征版本。
+
+每条 gold pair 至少包含：
+
+```text
+query_id
+candidate_id
+gold_status
+relation_granularity
+provenance
+evidence_source_id
+annotator_or_script_version
+verified_at
+split
+```
+
+每条 query 还必须包含：
+
+```text
+query_label_state  # complete_positive_set / confirmed_empty / unknown
+label_completeness
+negative_evidence_status
+review_status
+coordinate_status
+```
+
+`unknown` 不自动等同于 `confirmed_empty`，不进入训练负例、确认标签主指标、拒识阈值选择或概率校准。
+
+`provenance` 至少区分：
+
+- `original_annotation`：原始业务标注；
+- `external_derived`：依赖外源地理结果形成或补全；
+- `independent_review`：不展示同一模型输入中的外源证据而完成的独立复核。
+
+### 2.3 A 任务的全量核算
+
+query-level 标签必须与证据和坐标状态分开记录：
+
+- **`complete_positive_set`**：存在完整且非空的 `G(q)`；
+- **`confirmed_empty`**：仅由独立排除证据确认 `G(q)=empty`；
+- **`unknown`**：当前 mapping 未覆盖、候选覆盖不足、证据不足或存在冲突，不能自动视为负例；
+- **坐标状态**：单独记录，坐标不可用不改变实体标签。
+
+原有“强负例/弱负例”是证据或构造类别，不在完成独立排除前直接等同于 `confirmed_empty`；`5,899` 只表示当前 mapping 未覆盖的 query 数，不表示已确认候选侧不存在对应地点。
+
+`unknown` 和尚未完成核验的未覆盖 query 不进入训练负例、确认标签主指标、TN/拒识率或阈值校准。只有形成逐 query 的独立排除证据后，才可从 `unknown` 升级为 `confirmed_empty`。
+
+主结果必须同时报告：
+
+1. 全量业务覆盖：8,782 个 query 的标签状态、unknown、坐标不可用和待核验数量；
+2. 已确认标签性能：仅对确认标签计算正式指标，并报告筛选比例；
+3. 证据来源切片：`original_annotation`、`external_derived`、`independent_review` 分层；
+4. 坐标可用与不可用切片：坐标不可用样本不能静默删除，应进入文本/结构匹配和拒识分析；
+5. 待核验样本：不计入确认标签主分数，但报告数量、抽样复核结果和 unknown 比例。
+
+强负例若使用名称相似度和距离构造，必须明确其为协议规定的反事实负例；另行报告不依赖同一名称阈值的人工或独立证据负例敏感性分析。
+
+### 2.4 Hard Challenge
+
+自然评测集用于反映业务分布；Hard Challenge 单独用于检验物理地点歧义和抗名称捷径能力，不与自然集合并为一个总分。
+
+困难类别包括：
+
+| 类别 | 内容 | 标签要求 |
+|---|---|---|
+| P1 | 名称变体正例：简称、前后缀、分隔符、轻微错写 | 人工或独立证据确认同一地点 |
+| P2 | 同名消歧正例：同名候选中只有部分地点一致 | 按完整 `G(q)` 标注 |
+| P3 | 主字段完整遮蔽正例 | 遮蔽前后标签不变 |
+| P4 | 整体名称对应多个期次的正例 | 记录 `project_contains_phase`，允许集合输出 |
+| N1 | 同名异地负例 | 独立证据确认不同地点 |
+| N2 | 近距离异地负例：不同小区、期次或组团 | 至少保留可竞争候选 |
+| N3 | 同区县/同街道但不同物理地点 | 不把行政中心当精确地点 |
+| N4 | 整体名称下不同期次或不同组团的近邻负例 | 例如一期与二期默认不同实体 |
+| P5/N5 | 坐标不可用的可确认正例/负例切片 | 坐标不可用不能自动当负例 |
+
+Hard Challenge 的每条记录至少包含：
+
+```text
+query_id
+gold_candidate_ids
+label
+difficulty
+name_sim
+distance_m
+admin_match
+coords_trust
+evidence_source
+provenance
+annotation_status
+split
+mask_seed
+```
+
+无法独立确认的样本标记为 `unknown`，不计入确认标签主分数，另报抽样结果。若困难样本只出现在测试集，报告为 OOD stress test；若要解释为常规能力，训练和 validation 也必须包含实体不重叠的同类样本。
+
+### 2.5 主字段遮蔽
+
+遮蔽比例统一设为：
+
+```text
+rho in {0, 0.3, 0.6, 1.0}
+```
+
+同时报告两种协议：
+
+- `fixed_pool`：候选池在未遮蔽输入上冻结，遮蔽只作用于成对特征和排序，评估固定候选池上的条件性能；
+- `end_to_end`：遮蔽后同步清除名称、期次名称、重复拼接片段、召回索引和缓存文本，并重新执行候选召回；这是主结果协议。
+
+query 侧和 candidate 侧执行相同的遮蔽协议。两种协议复用同一 `mask_manifest`，但分别保存候选池版本和召回指标。`fixed_pool` 只能解释为排序诊断，`end_to_end` 才能解释为字段缺失下的完整系统鲁棒性。
+
+当主字段被遮蔽时，同时清除：
+
+- 原始主字段；
+- 规范化主字段；
+- 期次、组团和拼接字段中的重复名称；
+- 地址或 POI 查询文本中的重复名称片段；
+- 由主字段派生的缓存文本和召回索引。
+
+遮蔽后的结果报告为字段缺失鲁棒性，不表述为自然缺失分布的无偏估计。
 
 ## 3 方法方案
 
@@ -96,9 +238,13 @@
 
 原始 ID 只用于追踪和 mapping，不进入模型特征；A 的 SQL 源没有独立地址列，查询侧 `address` 恒为空，因此地址证据不能被解释为完整双侧地址匹配。
 
+任务 A 的召回主字段是整体项目名称/小区名称，实体判定字段是期次、组团、地址、行政区划、可信空间证据和结构字段；任务 B 的主匹配字段是 `征收处_房屋地址` ↔ `fwxxdz`，原始数据保留同行结构。A、B 分别报告、不合并总分，B 的留空负例按固定协议构造。
+
 外源 POI 资产按 `(来源, 记录ID)` 连接两侧。`code/er/geo_asset.py` 复用冻结资产中的“可信/不可信原因”，并按侧使用不同判据：物业处看坐标是否在重庆范围、解析 `level` 是否可信、解析区县是否与业务区县一致；房交坐标来自面坐标质心、没有 `level`，改看面坐标包围盒对角线是否 < 1000m 且逆地理编码区县是否与登记区县一致。当前资产 12,042 条记录中 9,451 条可信（物业处 6,329 + 房交 3,122），可信标记和不可信原因写入地理 manifest。
 
-只有两侧坐标都可信时才计算 Haversine 距离、距离分档和 `poi_district_match`；不可信坐标保留原因，不填为 `(0,0)`，不生成空间证据。mapping 中的原始标注和外源补全在 gold manifest 中分为 `original_annotation` 与 `external_derived`；未覆盖 query 保持 `unknown`，判定规则见 §5.1。
+只有两侧坐标都可信时才计算 Haversine 距离、距离分档和 `poi_district_match`；不可信坐标保留原因，不填为 `(0,0)`，不生成空间证据。mapping 中的原始标注和外源补全在 gold manifest 中分为 `original_annotation` 与 `external_derived`；未覆盖 query 保持 `unknown`，判定规则见 §2.2。
+
+每条外源结果还必须记录用途（`external_used_for_label` / `external_used_for_candidate` / `external_used_as_feature`）；既参与 gold 确认又进入特征的样本，须由不展示该结果的人工或第二来源复核，或标为 `external_derived` 单独报告。外源快照在标签确认、split 和调参前冻结。
 
 ### 3.2 多路候选召回与两个遮蔽协议
 
@@ -106,7 +252,7 @@
 
 名称捷径诊断发现自然名称 n-gram Recall@10 约为 99.83%，因此加入实体级固定 seed=42 的 `rho in {0, 0.3, 0.6, 1.0}` 遮蔽：
 
-两个协议的定义、清除范围和报告口径见 §5.4；本节只区分用途：`fixed_pool` 隔离排序对名称的依赖，`end_to_end` 测完整系统鲁棒性。
+两个协议的定义、清除范围和报告口径见 §2.5；本节只区分用途：`fixed_pool` 隔离排序对名称的依赖，`end_to_end` 测完整系统鲁棒性。
 
 四档完整候选库结果采用前者，因此其候选召回率恒为完整库条件下的 100%，不能当作 `end_to_end` 召回结论。
 
@@ -224,6 +370,8 @@ test                            ← 2 号组整体被分到 test数据集（划�
 问：为什么必须整簇分，不能按 pair 随机分？
 答：看那 4 个 2 queries + 1 candidate 的簇——同一个房源被两个小区都标成了 gold。如果按 pair 随机切，完全可能出现：query A 和这个房源在 train（模型见到这条正例），query B 和同一个房源在 test（模型又被要求再判一次）。模型等于背过了这个房源的名字和坐标，test 指标虚高，而且这种泄漏从结果上看不出来。
 
+主结果报告两种协议：**跨记录归纳**（测试记录 ID 未在训练出现，但同一物理地点可能有另一条记录）与**跨地点归纳**（测试物理地点实体簇完全不出现在训练；论文主协议）。随机 pair 划分只作附录诊断；整体名称覆盖多个期次时，项目级名称与其期次实体进入同一实体簇；B 侧地址重复且确认属同一建筑物的记录共享 `entity_cluster_id`，原记录保留、不删行。使用 5 个固定 seed，方法之间配对复用 split、候选池、负例和 mask。
+
 
 #### 3.3.6 命令六：构造train/vali/test的负例 并向量化（正式资产准备）
 
@@ -311,7 +459,7 @@ py code/run_full_library_experiment.py \
 
 用 pairs_train.csv 训练、用 pairs_validation.csv 定阈值，然后让 432 个物理实体的 test query 各自对全部 3,260 个pair候选打分，按阈值切成预测集合，最后算指标；rho = 0 / 0.3 / 0.6 / 1.0 四档 × 7 个方法，共 28 次独立运行（每次运行一次）。
 **1.** 四挡遮蔽：实体级别的遮蔽，只要这个query或者candidate被遮蔽了，就固定隐去这一行14维向量中的name_exact和name_similarity列（由命令六计算得出）。四挡指的是rho为四个数值时，按各自的概率隐去各自数量的行的这两列。pairs_train.csv永远是未遮蔽版本，遮蔽只发生在实验运行时的内存里。
-**2.** 用遮蔽后的训练集训练：输入 14 维数值特征，实际运行表中 1–7 共 7 个方法并输出正类概率；8–12 为补充对照，尚未在完整候选库上运行。
+**2.** 用遮蔽后的训练集训练：输入 14 维数值特征，实际运行表中 1–7 共 7 个方法并输出正类概率；8–13 为补充对照，尚未在完整候选库上运行。
 
 | # | 方法 | 类型 | 用到的特征 |
 |---|---|---|---|
@@ -321,12 +469,13 @@ py code/run_full_library_experiment.py \
 | 4 | LightGBM + POI | 学习 | 全部 14 维 |
 | 5 | **Full Model** | 学习 | 与 4 配置完全相同 |
 | 6 | E2 remove POI | 学习 | 与 3 配置完全相同 |
-| 7 | E4 structure-only | 学习 | 名字/地址/街道/类型全部置 0 |
+| 7 | E4b 全特征关闭 | 学习 | 文本/POI/行政开关全关，14 维全 0（退化对照） |
 | 8 | 规范化字段规则（未做实验） | 规则 | 非神经规则基线：规范化字段加权 |
 | 9 | 距离/行政规则（未做实验） | 规则 | 空间与粗粒度行政基线 |
 | 10 | 逻辑回归 pair classifier（完整候选库未做实验） | 学习 | 成对级已运行，完整候选库尚未纳入 |
 | 11 | LightGBM + POI + 行政中心（未做实验） | 学习 | 在当前 Full Model 上接入行政区划中心特征 |
 | 12 | 原始 LightGCN（未做实验） | 图模型 | 图传播附加对照，只作 transductive 结果 |
+| 13 | 随机负采样（未做实验） | 学习 | 特征同 Full Model，仅把分层困难负例改为随机负采样 |
 
 **3.** validation定阈值：因为F1等指标的计算过程需要知道预测为正的候选数具体有多少，而模型并不是输出的正负，而是概率，所以才需要计算阈值tau，大于tau就是正，小于就是负。阈值怎么计算？
 
@@ -347,7 +496,9 @@ py code/run_full_library_experiment.py \
 
 所以最后tau就是0.833。注意validation 被用了两次：既做早停监控，又用来选阈值，阈值指标存在轻微乐观偏差，应说明这是"validation-tuned"而非"test-tuned"。
 
-**4.** test预测打分：按照上一步validation的阈值tau 直接进行切割来计算F1等指标。test 不重新训练，validation 和 test 共用同一个已训练模型，test 阶段只做"打分 + 用 validation 定的阈值切集合"。 预测主要计算三个指标Precision	Recall	F1。全量汇总写入 `full_candidate_comparison.csv`
+**4.** test预测打分：按照上一步validation的阈值tau 直接进行切割来计算F1等指标。test 不重新训练，validation 和 test 共用同一个已训练模型，test 阶段只做"打分 + 用 validation 定的阈值切集合"。
+
+模型须能对新记录编码和推理；ID、已有关系、索引或图结构的使用方式必须在协议中写明。TF-IDF/SVD 只在 train 拟合；训练图只含 train gold 边，validation/test gold 边和测试标签派生边不得入图。每次运行前后检查：ID/行号/索引未作特征、同一实体未跨 split、train/validation/test gold 无交集、预处理符合 inductive/transductive 声明，并保存数据版本、配置、split manifest、候选池版本、外源快照哈希与阈值配置。 预测主要计算三个指标Precision	Recall	F1。全量汇总写入 `full_candidate_comparison.csv`
 
 #### 3.3.8 命令七产生的正式结果文件如何被使用
 
@@ -369,366 +520,155 @@ code/full_library_results_disk_v4/
 
 按 §3.3 的命令一至七依次执行；结果、manifest、query 集合和审计文件必须与 `rho`、split seed、数据版本和候选库协议一同保存。
 
-## 4 两个任务的定位
+## 4 实验一：完整候选库集合评估
 
-### 4.1 任务 A：同级评测任务
+### 4.1 设置
 
-| 项 | 内容 |
-|---|---|
-| Query 侧 | 物业处 8,782 条 |
-| 候选侧 | 房交处 3,260 条 |
-| 关系形态 | 非 1:1；query 侧最多 5 个 pair，平均 1.05 pair/query |
-| 召回主字段 | 整体项目名称/小区名称 |
-| 实体判定字段 | 期次、组团、地址、行政区划、可信空间证据和结构字段 |
-| 研究作用 | 独立业务表条件下的跨源地点解析 |
+以下结果来自 A 任务完整候选库穷举评估，覆盖每个测试 query 的全部 3,260 个房交候选，而不是有限构造负例。测试集为 432 个已映射正例 query，共 1,408,320 个 query-candidate pair；另外 5,899 个未映射 query 保持 `unknown` 并排除。映射完整性假设下，未列入现有 mapping 的候选暂按负例计，因此这些指标是条件性评估，不能当作已独立确认的负例结论。
 
-A 的自然名称一致率很高，必须单独报告名称遮蔽、同名异地、近距离异地和坐标不可用切片，避免把名称捷径当成物理地点理解。
+- 训练资产：`code/training_assets_full_v4`
+- 完整候选库结果：`code/full_library_results_disk_v4/full_candidate_comparison.csv`
+- 名称遮蔽比例：`rho ∈ {0, 0.3, 0.6, 1.0}`；实体级确定性遮蔽，seed=42
+- split：gold 图连通分量划分，seed=13；validation 433 个正例 query，test 432 个正例 query
+- 各模型阈值仅依据 validation 完整候选集选择
+- POI / Full Model 当前采用相同特征配置；`E1 remove admin` 尚未形成独立有效消融
 
-### 4.2 任务 B：同级评测任务
+名称遮蔽作用于训练、validation 和 test 的名称成对特征。该完整候选库实验仍是 `fixed_pool` 排序/集合输出评估，不等于名称遮蔽后同步重新生成名称召回索引的 `end_to_end` 实验。特别是 `rho=1.0` 的精确匹配基线会对每个候选给出相同的零分，validation 选出的阈值因此可能输出全部候选，不能把其 100% recall 解读为有区分能力。
 
-| 项 | 内容 |
-|---|---|
-| Query 侧 | 征收处 28,101 条 |
-| 候选侧 | 奥格 28,101 条 |
-| 关系形态 | 原始数据保留同行结构；实验输出仍允许集合 |
-| 主匹配字段 | `征收处_房屋地址` ↔ `fwxxdz` |
-| 空集标签 | 原始数据无天然空集；需按固定协议构造留空样本 |
-| 研究作用 | 同一工作簿内异构字段条件下的同级协议评测 |
+### 4.2 主对比（全候选集合评估）
 
-A、B 使用同一套三态标签、候选生成、成对匹配、集合输出和拒识协议，分别报告，不合并为一个总分。B 两侧来自同一 Excel，且字段高度同值；`id`、奥格编号和地址存在重复，不能使用行号、原始行顺序、编号或同行关系作为实体键或模型特征。B 的留空负例构造方式必须在配置中固定，并单独标记为构造协议。
+本节是**正式的全候选库实体解析主对比**：对每个测试 query 逐一评分全部 3,260 个房交 candidate，再按 validation 阈值输出一个候选集合。负例是该 query 的完整候选库中未被 gold mapping 标注的 candidate；因此这里评估的是“一个 query 最终返回哪些 candidate”的集合质量，而不是只在预先抽取的少量 pair 上做二分类。
 
-## 5 金标准与评测集
+本节报告 4 个名称遮蔽比例 `rho`，每格为 Precision / Recall / F1（%），括号内是 pair-level TP / FP / FN。宏平均 F1 单独报告，用于体现 query 间集合质量。
 
-### 5.1 版本化数据资产
+本节是固定 3,260 候选的集合输出评估；实验二（§5）的有限负例成对分类口径不同，两表不可合并或横向比较。
 
-实验开始前冻结并版本化：
+| 方法 | rho=0 | rho=0.3 | rho=0.6 | rho=1.0 |
+|---|---:|---:|---:|---:|
+| 主字段精确匹配 | 91.38 / 99.13 / 95.10 (456/43/4) | 88.66 / 47.61 / 61.95 (219/28/241) | 84.15 / 15.00 / 25.46 (69/13/391) | 0.03 / 100.00 / 0.07 (460/1,407,860/0) |
+| TF-IDF-like Cosine | 91.38 / 99.13 / 95.10 (456/43/4) | 88.66 / 47.61 / 61.95 (219/28/241) | 84.15 / 15.00 / 25.46 (69/13/391) | 0.03 / 100.00 / 0.07 (460/1,407,860/0) |
+| LightGBM Text/Structure | 94.59 / 98.91 / 96.71 (455/26/5) | 92.70 / 46.96 / 62.34 (216/17/244) | 71.43 / 17.39 / 27.97 (80/32/380) | 4.13 / 91.09 / 7.90 (419/9,727/41) |
+| LightGBM + POI | 92.74 / 100.00 / 96.23 (460/36/0) | 94.12 / 66.09 / 77.65 (304/19/156) | 95.63 / 47.61 / 63.57 (219/10/241) | 98.08 / 33.26 / 49.68 (153/3/307) |
+| Full Model | 92.74 / 100.00 / 96.23 (460/36/0) | 94.12 / 66.09 / 77.65 (304/19/156) | 95.63 / 47.61 / 63.57 (219/10/241) | 98.08 / 33.26 / 49.68 (153/3/307) |
 
-- `gold_pairs`：pair 级金标准；
-- `gold_sets`：每个 query 的完整 `G(q)`；
-- `evaluation_queries`：全量 query 及标签状态；
-- `candidate_pool`：完整候选池及版本；
-- `split_manifest`：实体簇与 train/validation/test 划分；
-- `mask_manifest`：遮蔽比例、query、seed 和派生字段处理；
-- `feature_manifest`：字段白名单、黑名单和特征版本。
+| 方法 | rho=0 宏平均 F1 | rho=0.3 宏平均 F1 | rho=0.6 宏平均 F1 | rho=1.0 宏平均 F1 |
+|---|---:|---:|---:|---:|
+| 主字段精确匹配 / TF-IDF-like Cosine | 96.56% | 47.21% | 15.34% | 0.07% |
+| LightGBM Text/Structure | 97.64% | 47.30% | 16.94% | 14.03% |
+| LightGBM + POI / Full Model | 97.95% | 66.24% | 48.41% | 33.83% |
 
-每条 gold pair 至少包含：
+### 4.3 消融
 
-```text
-query_id
-candidate_id
-gold_status
-relation_granularity
-provenance
-evidence_source_id
-annotator_or_script_version
-verified_at
-split
-```
+| 消融设置 | rho=0 P/R/F1 | rho=0.3 P/R/F1 | rho=0.6 P/R/F1 | rho=1.0 P/R/F1 |
+|---|---:|---:|---:|---:|
+| Full Model | 92.74 / 100.00 / 96.23 | 94.12 / 66.09 / 77.65 | 95.63 / 47.61 / 63.57 | 98.08 / 33.26 / 49.68 |
+| E1 remove admin | 未运行：当前特征接口未隔离行政中心证据 | 未运行 | 未运行 | 未运行 |
+| E2 remove POI | 94.59 / 98.91 / 96.71 | 92.70 / 46.96 / 62.34 | 71.43 / 17.39 / 27.97 | 4.13 / 91.09 / 7.90 |
+| E4b 全特征关闭 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 |
 
-每条 query 还必须包含：
+E2 在 rho=0.6 下相较 Full Model 的 Recall 低 30.22 个百分点、F1 低 35.60 个百分点；rho=1.0 时差距扩大到 Recall 低 55.78 个百分点、F1 低 41.78 个百分点。rho=1.0 时 Full Model precision 98.08%、F1 49.68%，而 Text/Structure F1 为 7.90%。Full Model 在高遮蔽档呈“高精确率、低召回”形态（rho=1.0 的误拒率 65.05%），说明当前全局单一阈值在名称不可用时偏保守。E4b 这一行不能作为“结构特征能力”的结论：`E4b 全特征关闭` 同时关闭 POI、行政与文本三档开关，14 维特征全部为 0，模型退化为常数并输出全部候选（P 0.03% / R 100.00%），因此其 F1 0.07% 只反映退化行为。上述结果使用 validation 阈值，需同时看 precision、recall、macro F1 和 false-reject，不能只看单一指标。
 
-```text
-query_label_state  # complete_positive_set / confirmed_empty / unknown
-label_completeness
-negative_evidence_status
-review_status
-coordinate_status
-```
+### 4.4 输出核验与限制
 
-`unknown` 不自动等同于 `confirmed_empty`，不进入训练负例、确认标签主指标、拒识阈值选择或概率校准。
+已核对：28 个 comparison 组合（4 个 rho × 7 个方法）；每个 query-set 文件均有 432 个唯一 query；各行 `prediction_count` / `gold_count` 与 JSON ID 列表长度一致；每个 rho 的 pair 混淆矩阵总数均为 432 × 3,260；预测列表无重复，且预测与 gold candidate ID 均属于标准化后的 3,260 条候选记录。
 
-`provenance` 至少区分：
+- `unknown` query 未作为负例，且本轮没有独立确认的 `confirmed_empty`，因此不报告严格拒识率或业务特异度。
+- 非 mapping 候选按负例计仅在当前 mapping 完整的假设下成立；需人工复核抽样 FP/FN 后再作业务结论。
+- `rho=0` 指不遮蔽名称；其余 rho 在各自训练和 validation 数据中也按固定实体哈希规则遮蔽。
+- 固定候选库实验未改变候选召回，所以不能替代 `end_to_end` 名称遮蔽召回实验。
+- A 查询侧没有独立地址字段；`Full Model` 与 `LightGBM + POI` 的特征配置当前相同。
 
-- `original_annotation`：原始业务标注；
-- `external_derived`：依赖外源地理结果形成或补全；
-- `independent_review`：不展示同一模型输入中的外源证据而完成的独立复核。
+## 5 实验二：有限负例成对分类诊断
 
-### 5.2 A 任务的全量核算
+### 5.1 设置
 
-query-level 标签必须与证据和坐标状态分开记录：
+本节记录当前 A 任务在主字段名称遮蔽协议下的成对分类实验结果。结果来自：
 
-- **`complete_positive_set`**：存在完整且非空的 `G(q)`；
-- **`confirmed_empty`**：仅由独立排除证据确认 `G(q)=empty`；
-- **`unknown`**：当前 mapping 未覆盖、候选覆盖不足、证据不足或存在冲突，不能自动视为负例；
-- **坐标状态**：单独记录，坐标不可用不改变实体标签。
+- 训练资产：`code/training_assets_full_v4`
+- 主对比结果：`code/experiment_results_masked/main_comparison.csv`
+- 消融结果：`code/experiment_results_masked/ablation.csv`
+- 遮蔽比例：`rho = 0.6`
+- 遮蔽随机种子：`42`
+- 评估 split：实体簇 connected component 划分，seed=13
+- 测试集：1,835 个 pair，其中 460 个正例、1,375 个构造负例
+- 阈值：仅在 validation 集上按 pair-level F1 选择，测试集不参与调参
 
-当前数据版本的已知核算如下。原有“强负例/弱负例”是证据或构造类别，不在完成独立排除前直接等同于 `confirmed_empty`：
+本轮是**名称遮蔽下的成对分类诊断实验**。它用于检验模型对名称捷径的依赖，以及 POI 特征的增量作用；不能直接解释为完整候选库上的最终实体解析结果，也不包含严格拒识指标。
 
-| 类别 | query 数 | 对应 pair 数 |
-|---|---:|---:|
-| 已确认正例，可评测 | 2,822 | 2,965 |
-| 当前 mapping 未覆盖，待核验 | 5,899 | — |
-| 其中：正例坐标不可用/不可信 | 61 | 61 |
-| 其中：负例坐标不可用/不可信 | 216 | — |
-| 其中：近处有候选且相似度处于待核验区间 | 215 | — |
-| 其中：同名但未配对、证据不足 | 156 | — |
-| **全量物业处 query** | **8,782** | **3,026 个 pair** |
+名称遮蔽只作用于名称相关成对特征：`name_exact` 和 `name_similarity`。地址、行政、结构和 POI 特征按当前训练资产保留。当前 A 查询侧没有独立地址字段，因此 `address_similarity` 不能解释为完整的双侧地址证据。
 
-校验：`2,965 + 61 = 3,026` 个 pair；`2,883 + 5,899 = 8,782` 个 query。`5,899` 仅表示当前 mapping 未覆盖的 query 数，不表示已经确认候选侧不存在对应地点。
+### 5.2 主对比
 
-`unknown` 和尚未完成核验的未覆盖 query 不进入训练负例、确认标签主指标、TN/拒识率或阈值校准。只有形成逐 query 的独立排除证据后，才可从 `unknown` 升级为 `confirmed_empty`。
+本节是**名称遮蔽下的成对分类诊断主对比**，不是完整候选库上的最终实体解析主对比。模型只对预先构造的 1,835 个 query-candidate pair 做二分类：其中 460 个正例、1,375 个困难负例，然后报告 pair-level Precision / Recall / F1 和混淆矩阵。
 
-主结果必须同时报告：
+本节是 1,835 个 pair 上的成对二分类；实验一（§4）是完整候选库集合输出，两表不可合并或横向比较。
 
-1. 全量业务覆盖：8,782 个 query 的标签状态、unknown、坐标不可用和待核验数量；
-2. 已确认标签性能：仅对确认标签计算正式指标，并报告筛选比例；
-3. 证据来源切片：`original_annotation`、`external_derived`、`independent_review` 分层；
-4. 坐标可用与不可用切片：坐标不可用样本不能静默删除，应进入文本/结构匹配和拒识分析；
-5. 待核验样本：不计入确认标签主分数，但报告数量、抽样复核结果和 unknown 比例。
+| 方法 | 类型 | Precision | Recall | F1 | TP | FP | FN | TN |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 主字段精确匹配 | 规则 | 100.00% | 40.43% | 57.59% | 186 | 0 | 274 | 1,375 |
+| TF-IDF-like Cosine | 规则基线 | 99.47% | 41.09% | 58.15% | 189 | 1 | 271 | 1,374 |
+| Text/Structure Rule | 规则基线 | 45.06% | 93.26% | 60.76% | 429 | 523 | 31 | 852 |
+| Logistic Text/Structure | 逻辑回归 | 85.43% | 56.09% | 67.72% | 258 | 44 | 202 | 1,331 |
+| LightGBM Text/Structure | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
+| LightGBM + POI | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
+| Full Model | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
 
-强负例若使用名称相似度和距离构造，必须明确其为协议规定的反事实负例；另行报告不依赖同一名称阈值的人工或独立证据负例敏感性分析。
+#### 结果解读
 
-### 5.3 Hard Challenge
+在 `rho=0.6` 的名称遮蔽下，名称精确匹配和 TF-IDF 基线的 Recall 降至约 40%（40.43% / 41.09%），说明自然数据中的高结果明显依赖名称信息。Text/Structure 规则通过放宽判定把 Recall 提到 93.26%，但 FP 达 523、Precision 仅 45.06%，F1 为 60.76%。LightGBM Text/Structure 把 Precision 提到 85.35%，F1 为 69.25%。加入可信 POI 后，Recall 提升到 89.35%、F1 提升到 89.15%，Precision 保持 88.96%。
 
-自然评测集用于反映业务分布；Hard Challenge 单独用于检验物理地点歧义和抗名称捷径能力，不与自然集合并为一个总分。
+因此，在当前遮蔽协议下，POI 对抗名称缺失具有明显增量效果：
 
-困难类别包括：
+- 相比 LightGBM Text/Structure，Full Model 的 Recall 提升 31.09 个百分点；
+- F1 提升 19.90 个百分点；
+- TP 从 268 增至 411、FN 从 192 降至 49；FP 从 46 微增至 51。
 
-| 类别 | 内容 | 标签要求 |
-|---|---|---|
-| P1 | 名称变体正例：简称、前后缀、分隔符、轻微错写 | 人工或独立证据确认同一地点 |
-| P2 | 同名消歧正例：同名候选中只有部分地点一致 | 按完整 `G(q)` 标注 |
-| P3 | 主字段完整遮蔽正例 | 遮蔽前后标签不变 |
-| P4 | 整体名称对应多个期次的正例 | 记录 `project_contains_phase`，允许集合输出 |
-| N1 | 同名异地负例 | 独立证据确认不同地点 |
-| N2 | 近距离异地负例：不同小区、期次或组团 | 至少保留可竞争候选 |
-| N3 | 同区县/同街道但不同物理地点 | 不把行政中心当精确地点 |
-| N4 | 整体名称下不同期次或不同组团的近邻负例 | 例如一期与二期默认不同实体 |
-| P5/N5 | 坐标不可用的可确认正例/负例切片 | 坐标不可用不能自动当负例 |
+### 5.3 消融
 
-Hard Challenge 的每条记录至少包含：
+| 消融设置 | 模型类型 | Precision | Recall | F1 | TP | FP | FN | TN |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Full Model LightGBM | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
+| E1 remove admin | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
+| E2 remove POI | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
+| E3 text structure only | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
+| E4a 结构+行政-only | LightGBM | 32.50% | 99.13% | 48.95% | 456 | 947 | 4 | 428 |
 
-```text
-query_id
-gold_candidate_ids
-label
-difficulty
-name_sim
-distance_m
-admin_match
-coords_trust
-evidence_source
-provenance
-annotation_status
-split
-mask_seed
-```
+#### 消融解读
 
-无法独立确认的样本标记为 `unknown`，不计入确认标签主分数，另报抽样结果。若困难样本只出现在测试集，报告为 OOD stress test；若要解释为常规能力，训练和 validation 也必须包含实体不重叠的同类样本。
+- 去除 POI 后，F1 从 89.15% 降至 69.25%，FN 从 49 增至 192，说明 POI 是名称遮蔽条件下的主要补充证据。
+- 仅使用结构特征时 Recall 很高（99.13%），但 FP 增加到 947、Precision 降至 32.50%，说明结构字段只能提供宽松筛选，不能单独完成精确链接。
+- 当前 E1 与 Full Model 数值相同，原因是当前成对特征资产尚未真正加入独立的行政中心距离特征。因此 E1 只能作为占位诊断，不能写成“去行政中心后的有效消融结论”。
+- 当前 E2 与 E3 使用相同的特征白名单，后续若拆分行政、街道和其他结构特征，需要重新生成特征资产后再报告独立 E3。
+- E4 的两种实现已分开命名：本节 **E4a 结构+行政-only** 保留 `area_match`、`street_match`、`coords_available`（`experiments.vector` 只清空文本与 POI 字段）；§4.3 **E4b 全特征关闭** 在 `full_library.record_features` 里同时关闭行政开关，14 维全为 0 并退化为常数模型。两者不可互相引用。
+- 现有结果 CSV 与 query_sets 文件名生成于改名之前，`method` 列仍是旧名 `E4 structure-only`；对应关系为 **E4a = 成对级（本节）**、**E4b = 完整候选库（§4.3）**。
 
-### 5.4 主字段遮蔽
+## 6 评估边界
 
-遮蔽比例统一设为：
+1. 当前负例是按同一实体 split 构造的有限困难负例，不是每个 query 对完整候选库的集合预测。
+2. `unknown` query 没有作为负例；当前没有足够的 `confirmed_empty` 样本，因此本表不报告严格拒识率、特异度或 TN-based 拒识指标。
+3. 当前 query-level 指标是对测试候选集合进行汇总的集合指标，不等同于对全量业务 query 的完整 macro 指标。
+4. 当前 A 查询侧没有独立地址字段，地址相关特征不能被解释为双侧完整地址匹配。
+5. `Full Model` 与 `LightGBM + POI` 当前特征配置相同，因此结果相同；完整行政中心特征接入后需要重新生成 Full Model。
+6. 当前遮蔽只清除成对名称特征。正式 `end_to_end` 主协议还应同步清除名称派生召回索引，并重新生成候选池；本表主要用于成对分类和名称捷径诊断。
+7. 结果不得与未遮蔽自然集结果合并为一个总分。自然集、遮蔽集、provenance 和坐标可信度必须分层报告。
+
+## 7 可复现命令
 
 ```text
-rho in {0, 0.3, 0.6, 1.0}
+py code/run_experiments.py \
+  --data-dir code/training_assets_full_v4 \
+  --output-dir code/experiment_results_masked \
+  --mask-ratio 0.6 \
+  --mask-seed 42
 ```
 
-同时报告两种协议：
+回归测试：16 项测试通过。
 
-- `fixed_pool`：候选池在未遮蔽输入上冻结，遮蔽只作用于成对特征和排序，评估固定候选池上的条件性能；
-- `end_to_end`：遮蔽后同步清除名称、期次名称、重复拼接片段、召回索引和缓存文本，并重新执行候选召回；这是主结果协议。
-
-query 侧和 candidate 侧执行相同的遮蔽协议。两种协议复用同一 `mask_manifest`，但分别保存候选池版本和召回指标。`fixed_pool` 只能解释为排序诊断，`end_to_end` 才能解释为字段缺失下的完整系统鲁棒性。
-
-当主字段被遮蔽时，同时清除：
-
-- 原始主字段；
-- 规范化主字段；
-- 期次、组团和拼接字段中的重复名称；
-- 地址或 POI 查询文本中的重复名称片段；
-- 由主字段派生的缓存文本和召回索引。
-
-遮蔽后的结果报告为字段缺失鲁棒性，不表述为自然缺失分布的无偏估计。
-
-## 6 划分与防泄漏
-
-### 6.1 主划分
-
-不能按 pair 随机切分。先建立完整 gold 二部图，以 connected component 作为最小划分单元；必要时把经独立证据确认的同一物理地点或同一组团合并为实体簇。相关 query、candidate、别名、困难扰动和由其生成的负候选只能进入同一 split。
-
-主结果报告两种协议：
-
-- **跨记录归纳**：测试记录 ID 在训练阶段未出现，但同一物理地点可能在训练数据中有另一条记录；
-- **跨地点归纳**：测试物理地点实体簇不出现在训练阶段；这是论文主协议。
-
-整体名称覆盖多个期次时，项目级名称实体及其期次实体必须进入同一实体簇；一期与二期不能按名称拆开后跨 split。地址重复且已确认属于同一物理地址建筑物的 B 记录共享 `entity_cluster_id`，但原始记录保留，不以删除行替代实体聚合。
-
-随机 pair 划分只能作为附录诊断，不作为主结论。使用 5 个固定 seed，报告均值和标准差；方法之间配对复用 split、候选池、负例和 mask。
-
-### 6.2 归纳式要求
-
-主模型应能够对新记录进行编码和推理。是否使用记录 ID、已有关系、索引信息或图结构，由具体模型协议决定；每个协议必须明确写出这些信息的来源、作用和是否可能造成传导式结果。
-
-若使用 TF-IDF/SVD，归纳式主结果只在 train fit，再 transform validation/test；允许全量无标签文本参与拟合时，必须单列为 transductive 结果。
-
-训练图若保留，只能包含允许的 train gold 边。validation/test gold 边、测试标签和由测试标签派生的辅助边不得进入训练图。
-
-### 6.3 外源证据独立性
-
-外源 API 快照必须在标签确认、split 和调参前冻结，保存原始响应、查询文本、采集时间、API 版本、坐标系、许可和配额信息。
-
-同一 POI 结果如果参与 gold 确认，又进入模型特征，则不能在同一主结果中同时被当作独立标签证据和模型证据。每条外源结果必须记录其用途：
-
-```text
-external_used_for_label
-external_used_for_candidate
-external_used_as_feature
-```
-
-此类样本必须：
-
-- 由不展示该 POI 结果的人工或第二独立来源复核；或
-- 标为 `external_derived`，单独报告。
-
-POI 进入 Full Model 的可信空间特征。`text/structure-only` 作为必要对照；如果 POI 参与候选召回，POI-disabled 运行必须重新生成候选池和召回指标，不能只删除距离特征。
-
-### 6.4 泄漏检查清单
-
-每次实验运行前后保存并检查：
-
-- query ID、candidate ID、Excel 行号和合并索引是否作为特征，必须按实验协议显式记录；
-- 同一 B 实体和同一物理地点未跨 split；
-- train/validation/test 的 gold 集合没有交叉；
-- TF-IDF/SVD 和可学习预处理符合 inductive/transductive 声明；
-- 测试标签、已有对应关系和索引信息的使用方式与实验协议一致，并有独立对照；
-- 外源快照在标签、split 和调参前冻结；
-- 训练图只含允许的 train gold 边；
-- 每次运行保存数据版本哈希、配置哈希、split manifest、候选池版本、外源快照哈希和阈值配置。
-
-## 7 指标
-
-### 7.1 候选与排序
-
-候选阶段：
-
-- `candidate_recall@K`；
-- 平均候选数；
-- 候选覆盖率；
-- 各召回通道的增量覆盖率。
-
-排序阶段：
-
-- Recall@1/5/10；
-- MRR；
-- nDCG；
-- query-macro 集合 Precision/Recall/F1；
-- pair-micro 集合 Precision/Recall/F1。
-
-### 7.2 链接与拒识
-
-对于 `G(q) != empty` 的正例 query：
-
-- any-hit：`S(q) ∩ G(q) != empty`；
-- 集合级 precision/recall：惩罚漏配和过量输出；
-- 误拒率：预测空集合的正例比例。
-
-对于 `G(q) = empty` 的 query，只有 `query_label_state=confirmed_empty` 才进入确认负例拒识指标：
-
-- 正确拒识率/特异度：正确输出空集合的确认空集比例；
-- 错误链接率：确认空集 query 输出非空集合的比例。
-
-`unknown`、未覆盖待核验 query 和无法证明完整性的 query 不进入上述分母，也不进入训练负例和阈值校准。
-
-主表必须报告：
-
-```text
-TP, FP, FN, TN
-预测链接率
-link precision / recall / F1
-负例拒识率
-正例误拒率
-balanced accuracy
-AUROC / AUPRC
-```
-
-Precision 的分母是预测为链接的 query 数，Recall 的分母是真实正 query 数；不得把所有指标都写成“分母为全部 query”。所有表格注明 query 或 pair 基数。
-
-### 7.3 可靠性
-
-在不使用测试标签调参的前提下报告：
-
-- coverage-risk 曲线；
-- risk@coverage；
-- P@90% coverage；
-- ECE；
-- Brier score；
-- 校准曲线；
-- 强负例和弱负例分别的拒识率。
-
-旧版 `P = R = Hit@K` 的评估定义废弃。Hit@K 只能作为附录检索诊断，不能作为主 Precision、Recall 和 F1。
-
-## 8 消融实验
-
-全部方法使用相同候选池、实体划分、mask、阈值选择协议和输出定义；12 个方法的完整对照表见 §3.3.7（其中 8–12 尚未在完整候选库上运行）。
-
-消融统一编号：
-
-- E1：去行政区划中心特征；
-- E2：去 POI 坐标和距离特征；
-- E3：去空间/行政辅助关系，仅保留成对字段特征；
-- E4：距离分层负采样改为随机负采样；
-- E5：`rho=0` 与各遮蔽率对照；
-- E6：按 POI 可信度、level 和 provenance 分层，或完全禁用 POI。
-
-每项消融只改变一个因素。结论必须按自然评测集、Hard Challenge、坐标可信度、gold provenance 和遮蔽率分层报告。
-
-## 9 执行顺序与验收标准
-
-| # | 步骤 | 验收标准 | 状态 |
-|---|---|---|---|
-| 1 | 冻结数据和外源资产 | 原始文件、POI、行政中心、坐标转换和快照均有版本与哈希 | 基础资产和 POI manifest 已完成；行政中心特征仍待接入审计 |
-| 2 | 锁定 gold provenance | 3,026 pair、2,883 query、2,709/317 来源分层；独立复核状态明确 | 已完成原始标注/外源补全分层；independent_review 和 mapping 完整性仍待确认 |
-| 3 | 生成评测资产 | `gold_sets`、全量 query、候选池、unknown、confirmed_empty、负例和 manifest 数字闭合 | gold/candidate/split/training 资产已生成；confirmed_empty 和独立排除证据仍待做 |
-| 4 | 实现实体簇划分 | connected component/物理地点簇不跨 split；整体名称与期次归入同一项目簇；地址重复的 B 记录共享实体簇；保存 5 个 seed | A connected component split 已完成 5 个 seed；B 和项目/期次人工簇仍待做 |
-| 5 | 实现字段遮蔽 | 四个 rho、派生字段同步清除、mask 固定复用 | 四个 rho 的 fixed_pool 已完成；end_to_end 候选池遮蔽框架已完成，完整库结果仍属 fixed_pool |
-| 6 | 实现候选生成 | 多路召回、候选版本、candidate recall@K 和失败记录 | A 自然/fixed_pool/end_to_end 候选池与召回审计已完成；POI-disabled 独立重召回仍需作为最终消融固化 |
-| 7 | 实现成对特征和主模型 | 记录对特征、LightGBM/逻辑回归、缺失和冲突处理 | A 成对特征、分层负例、逻辑回归/LightGBM 诊断已完成；行政中心距离特征和独立 E1 尚未实现 |
-| 8 | 实现集合输出与拒识 | validation 校准、冻结阈值、集合指标和拒识指标 | validation 阈值和 full-pool 集合输出已完成；概率校准、confirmed_empty 拒识指标未完成 |
-| 9 | 实现对照和消融 | A、B 两个同级任务、Hard Challenge、E1–E6；分别报告，不合并总分 | A 完整库四档遮蔽主对照及部分消融已完成；B、Hard Challenge、E1/E3/E4–E6 正式对照仍待做 |
-| 10 | 泄漏审计和错误分析 | checklist、哈希、错误样本、provenance 和坐标切片报告 | split、输入/POI manifest、缓存 SHA-256 和集合一致性已审计；人工 FP/FN、可靠性和校准分析仍待做 |
-
-在第 3–10 步完成前，运行结果只能称为现有代码基线或数据核查，不得称为 Full Model 主结果。`unknown` 保持为 `unknown`，不因当前未映射而升级为 `confirmed_empty`。在 `confirmed_empty` 尚未由独立排除证据形成前，只报告其覆盖情况和诊断结果，不报告严格拒识主指标。
-
-## 10 当前风险与结论边界
-
-1. A 的名称一致率很高（见 §2），自然集可能被主字段捷径主导；必须以遮蔽和困难集检验物理地点证据。
-2. A 的自然名称变体只有 15 条，不能据此声称自然异名解析已经充分验证。
-3. B 与 A 同级评测但必须分别报告；B 的同行字段同值、重复地址和已修复 ID 不能被解释为独立跨源泛化证据。
-4. 外源 POI 是由名称/地址派生的地理证据，进入 Full Model 但必须记录标签、候选和特征用途并按 provenance 分层。
-5. 行政区划中心是粗粒度位置，不是行政边界，也不是精确地点坐标。
-6. 坐标不可用样本不能静默删除，至少要单独报告文本/结构匹配和拒识结果。
-7. 未映射 query 和 unknown 不能自动作为 confirmed_empty；严格拒识结论需有独立排除证据。
-
-## 11 可复现性
-
-- 固定随机种子和软件环境；
-- 所有结果注明任务、split 协议、rho、query/pair 基数、gold provenance 和坐标可信度切片；
-- 数据版本、外源快照与每次运行的哈希留痕要求见 §6.3 和 §6.4。
-
-## 12 运行入口与代码结构
-
-### 12.1 环境
-
-- Python 3.12；核心单元测试只用标准库，完整模型实验需要 LightGBM 4.x：`py -m pip install lightgbm`。
-- 原始数据默认从 `数据/` 读取，路径与字段映射集中在 `code/er/config.py`；所有命令都不修改原始数据。
-- 全部命令在仓库根目录执行；完整执行顺序见 §3.4，本节只补 §3.4 未包含的入口。
-
-### 12.2 补充命令
-
-| 用途 | 命令 |
-|---|---|
-| 小样本候选池 | `py code/build_candidates.py --query-limit 12 --candidate-limit 48 --mapping-limit 20 --output-dir code/_smoke/candidate_pool --k 20` |
-| 自然候选池与召回审计 | `py code/build_candidates.py --output-dir code/candidate_pool_full --protocol natural --k 20` |
-| 四档 `end_to_end` 遮蔽召回 | `py code/run_masked_candidate_sweep.py --output-dir code/candidate_pool_mask_sweep --protocol end_to_end --k 20 --seed 42` |
-| 有限负例成对诊断 | `py code/run_pair_model_experiments.py --data-dir code/training_assets_full_v4 --output-dir code/pair_model_results --mask-ratio 0.6 --mask-seed 42` |
-
-`code/_smoke/` 是临时诊断目录，命令验证通过后可删除，不作为论文结果。
-
-### 12.3 代码结构
+## 8 代码结构
 
 | 模块 | 职责 |
 |---|---|
+| `code/*.py` | 入口脚本：`build_evaluation_assets`、`audit_geo_assets`、`build_entity_splits`、`build_pair_features`、`build_candidates`、`run_masked_candidate_sweep`、`run_pair_model_experiments`、`run_full_library_experiment`、`smoke_test` |
 | `er/config.py` | 数据路径与任务字段配置 |
 | `er/io.py`、`er/normalize.py` | 读取、字段标准化与文本相似度 |
 | `er/geo.py`、`er/geo_asset.py`、`er/poi_candidate.py` | 坐标、可信 POI 与网格召回 |
@@ -740,6 +680,5 @@ Precision 的分母是预测为链接的 query 数，Recall 的分母是真实�
 | `er/experiments.py`、`er/lightgbm_model.py` | 成对模型、阈值与 LightGBM |
 | `er/full_library.py`、`er/disk_cache.py` | 完整候选库、磁盘缓存与集合输出 |
 | `er/pipeline.py`、`er/model.py`、`er/output.py` | 小样本基线流程 |
+| `code/external/` | 外源资产重建：行政区划补全、区划表生成、复核清单、资产合并与命中率评估 |
 | `tests/` | 16 项回归测试 |
-
-已完成结果与解释边界见 `experiment.md`。

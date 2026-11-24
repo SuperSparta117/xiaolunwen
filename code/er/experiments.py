@@ -195,7 +195,7 @@ def run_experiments(data_dir: Path, output_dir: Path, *, mask_ratio: float = 0.6
         ("E1 remove admin", True, True),
         ("E2 remove POI", False, True),
         ("E3 text structure only", False, True),
-        ("E4 structure-only", False, False),
+        ("E4a 结构+行政-only", False, False),
     ]:
         ablations.append(evaluate_model(name, train, validation, test, use_poi=use_poi, use_text=use_text, model_type="lightgbm", model_output_dir=output_dir))
     fields = sorted({key for result in ablations for key in result})
