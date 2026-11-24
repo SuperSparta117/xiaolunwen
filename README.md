@@ -54,7 +54,7 @@
 
 ## 3 方法方案
 
-本项目最终采用“统一记录视图 -> 多路候选池 -> 成对特征 -> 成对模型 -> 验证集阈值 -> 集合输出”的六步流程。实现过程中对原计划作了两项重要工程化调整：完整候选库评分改为逐 query、逐候选分批计算并持久化到 `.audit_work/full_candidate_cache`，避免将 432 × 3,260 的预测字典同时留在内存；名称遮蔽实验同时保留 `fixed_pool` 诊断协议，并将名称遮蔽后的候选召回作为单独的 `end_to_end` 协议，避免混淆“排序退化”和“候选生成退化”。
+本项目最终采用“统一记录视图 -> 多路候选池 -> 成对特征 -> 成对模型 -> 验证集阈值 -> 集合输出”的六步流程。实现过程中对原计划作了两项重要工程化调整：完整候选库评分改为逐 query、逐候选分批计算并持久化到可恢复的磁盘 score cache（`.audit_work/full_candidate_cache_v4`），避免将 432 × 3,260 的预测字典同时留在内存；名称遮蔽实验同时保留 `fixed_pool` 诊断协议，并将名称遮蔽后的候选召回作为单独的 `end_to_end` 协议，避免混淆“排序退化”和“候选生成退化”。
 
 ```text
 ① 异构输入 + 字段映射
@@ -75,16 +75,16 @@
 ⑥ validation 阈值 -> 完整候选集合 -> 拒识诊断
 ```
 
-### 3.1 ① 输入、映射和统一记录视图
+### 3.1 统一记录视图与坐标可信判定
 
-任务 A 的 query 是物业处 SQL 中的 `village_id`、小区名称、区县、街道等字段；候选是房屋交易 CSV 中的 `愉悦安`、小区名、区县、街道等字段。`code/er/config.py` 固定原始文件路径和任务配置，`code/er/io.py` 用真实 INSERT 列名解析 SQL，并将两侧记录标准化为统一视图：
+任务 A 的 query 来自物业处 SQL（`village_id`、`village_name`、`area_name`、`street_name` 等），候选来自房交 CSV（`愉悦安`、`小区名`、`区县`、`地址`、`物业类型`）。`code/er/config.py` 固定原始文件路径与任务字段，`code/er/io.py` 按真实 INSERT 列名解析 SQL，两侧统一为：
 
 ```python
 {
     "id": "源内稳定记录 ID",
-    "name": "规范化前后可追踪的小区名称",
+    "name": "规范化小区名称",
     "area": "规范化区县",
-    "street": "规范化街道",
+    "street": "规范化行政街道",
     "address": "可用时的规范化地址",
     "type": "物业类型",
     "lng": "经度（若可用）",
@@ -94,48 +94,23 @@
 }
 ```
 
-A SQL 源本身没有独立的地址列，因此查询侧地址证据不能被解释为完整双侧地址匹配。原始 ID 只用于追踪和 mapping，不进入模型特征。
+原始 ID 只用于追踪和 mapping，不进入模型特征；A 的 SQL 源没有独立地址列，查询侧 `address` 恒为空，因此地址证据不能被解释为完整双侧地址匹配。
 
-### 3.2 ② POI 连接、坐标可信判定和 provenance
+外源 POI 资产按 `(来源, 记录ID)` 连接两侧。`code/er/geo_asset.py` 复用冻结资产中的“可信/不可信原因”，并按侧使用不同判据：物业处看坐标是否在重庆范围、解析 `level` 是否可信、解析区县是否与业务区县一致；房交坐标来自面坐标质心、没有 `level`，改看面坐标包围盒对角线是否 < 1000m 且逆地理编码区县是否与登记区县一致。当前资产 12,042 条记录中 9,451 条可信（物业处 6,329 + 房交 3,122），可信标记和不可信原因写入地理 manifest。
 
-POI 资产按 `(来源, 记录ID)` 连接两侧记录。POI 原始坐标为 GCJ-02，源数据坐标按资产规则保留并记录；`code/er/geo_asset.py` 复用冻结资产中的“可信/不可信原因”，并按侧使用不同判据：物业处看坐标是否在重庆范围、解析 level 是否可信、解析区县是否与业务区县一致；房交坐标来自面坐标质心、没有 level，改看面坐标包围盒对角线是否 < 1000m 且逆地理编码区县是否与登记区县一致。当前资产有 12,042 条记录，其中 9,451 条可信（物业处 6,329 + 房交 3,122），可信标记和不可信原因写入地理 manifest。
+只有两侧坐标都可信时才计算 Haversine 距离、距离分档和 `poi_district_match`；不可信坐标保留原因，不填为 `(0,0)`，不生成空间证据。mapping 中的原始标注和外源补全在 gold manifest 中分为 `original_annotation` 与 `external_derived`；未覆盖 query 保持 `unknown`，判定规则见 §5.1。
 
-只有 query 和 candidate 两侧坐标均可信时，才计算 Haversine 距离、距离分档和 `poi_district_match`；不可信坐标保留原因，不填为 `(0,0)`，不生成空间证据。mapping 中的原始标注和外源补全在 gold manifest 中分为 `original_annotation` 与 `external_derived`，未覆盖 query 保持 `unknown`，不能自动当作空集。
-
-### 3.3 ③ 多路候选召回与两个遮蔽协议
+### 3.2 多路候选召回与两个遮蔽协议
 
 自然候选池由名称字符 n-gram、地址字符 n-gram、区县和其他结构通道取并集生成；可信 POI 还通过 2 km 网格及相邻 8 个网格召回。`code/build_candidates.py` 输出候选池、通道来源、候选版本、`candidate_recall_at_k.csv` 和通道增量覆盖率。
 
 名称捷径诊断发现自然名称 n-gram Recall@10 约为 99.83%，因此加入实体级固定 seed=42 的 `rho in {0, 0.3, 0.6, 1.0}` 遮蔽：
 
-- `fixed_pool`：候选池冻结，遮蔽只作用于成对特征和排序；用于隔离排序模型对名称的依赖；
-- `end_to_end`：同步清除名称、规范化名称、期次/组团派生文本和名称召回索引，再生成候选池；用于完整系统鲁棒性。
+两个协议的定义、清除范围和报告口径见 §5.4；本节只区分用途：`fixed_pool` 隔离排序对名称的依赖，`end_to_end` 测完整系统鲁棒性。
 
 四档完整候选库结果采用前者，因此其候选召回率恒为完整库条件下的 100%，不能当作 `end_to_end` 召回结论。
 
-### 3.4 ④ 成对特征和分层负例
-
-当前成对特征包括 `name_exact`、`name_similarity`、`address_similarity`、`area_match`、`street_match`、坐标可用/可信、POI 距离及距离分档、POI 区县一致、类型一致等。名称遮蔽作用于 query 或 candidate 任一实体时，名称相关特征置零；地址、行政和 POI 特征按协议保留。
-
-`code/build_pair_features.py` 先按 gold 二部图 connected component 生成实体簇 split，再生成正例和同 split 的困难负例，避免按 pair 随机切分导致实体泄漏。负例包含同区县、同街道、空间近邻和结构相似的候选。最终使用 `code/training_assets_full_v4`，训练/validation/test pair 资产分别为 8,454 / 1,788 / 1,835 条，其中 `street_match`、`poi_district_match` 为行政区划补全后的真实值；完整候选库评估不把有限负例表当作最终候选集合。
-
-### 3.5 ⑤ 成对模型
-
-`code/run_pair_model_experiments.py` 比较主字段精确匹配、TF-IDF-like Cosine、逻辑回归、LightGBM Text/Structure、LightGBM + POI 和消融模型。LightGBM 使用原生 API，不把记录 ID、行号或同行关系作为输入。
-
-完整候选库使用 `code/run_full_library_experiment.py`：每个 query 遍历全部 3,260 个候选，每 256 个候选构造一次特征矩阵并将 score CSV 立即写入磁盘 cache。每个 `rho × method × split` 有独立完成标记和 SHA-256；重启时复用完成 split。这样内存只保留当前 query 的候选对象和一个小批量特征矩阵，而不是保留全体 query-candidate Python 字典。
-
-### 3.6 ⑥ validation 阈值和集合输出
-
-每个方法只用 433 个 validation 正例 query 的完整候选分数选择阈值，再冻结阈值到 432 个 test 正例 query。输出定义为：
-
-```text
-S(q; tau) = { b in B | p(q,b) >= tau }
-```
-
-对每个 test query 保存 `gold_candidate_ids`、`predicted_candidate_ids`、预测数量和 gold 数量；统计 pair-level TP/FP/FN/TN、precision/recall/F1、query-macro 集合指标、any-hit 和正例误拒率。5,899 个未映射 query 保持 `unknown`，不进入这些确认正例分母；非 mapping candidate 作为负例的解释依赖 mapping 完整性假设。当前尚未形成独立 `confirmed_empty` 集，因此不宣称严格业务拒识率。
-
-### 3.7 按命令展开的真实数据流示例
+### 3.3 按命令展开的真实数据流示例
 
 本节严格按实际执行命令展开，分为两个阶段：命令一至三是测试阶段（回归测试、小样本流程冒烟、小样本金标准资产生成），不会构成正式实验结果；命令四至六是使用全量数据准备正式实验资产；命令七才运行完整候选库四档遮蔽模型评估并生成正式结果。为追踪端到端数据流，使用一个真实测试 query `1680855546638295042` 和它的两个真实 gold candidate：`3556656f402e943645de829cc3fe6b17`、`72fb5d015b2cd8492ca8d9c7918e45ea`。该 query 在原始 SQL 中确实存在，mapping 中确实对应这两个候选，其中一条来源标为原始标注，另一条来源标为外源补全。由于当前终端读取中文源文件时可能显示编码替代字符，下面不把乱码强行反解为中文地名，而以稳定 ID、文件字段和生成的 CSV 为准。命令示例均从仓库根目录执行。
 
@@ -151,15 +126,15 @@ S(q; tau) = { b in B | p(q,b) >= tau }
 | 六：成对训练资产 | 正式资产准备 | 全量记录、mapping、split 和 POI | 生成 train/validation/test 特征数据 |
 | 七：完整候选库实验 | 正式实验 | 全量训练资产及 3,260 candidates | 生成四档比较表和 query 集合 |
 
-#### 3.7.1 命令一：运行回归测试（测试）
+#### 3.3.1 命令一：运行回归测试（测试）
 
 ```text
 py -m unittest discover -s code/tests -v
 ```
 
-这条命令不读取全量业务数据，也不生成论文结果。`unittest discover` 在 `code/tests` 下寻找测试文件，验证标准化、候选生成、地理计算、标签状态、遮蔽和 split 等基础函数。实际结果为 15 项测试通过；例如测试会验证 `龙湖花园一期` 的名称标准化、候选 `b1` 能被名称通道召回，以及集合阈值 `0.72` 能输出分数 `0.8` 的候选。这里的 `q`/`b1` 是测试代码中人工构造的 fixture，不是业务数据。该命令把源码行为转换成可重复的“代码契约”，失败时后续资产不能视为可靠。
+这条命令不读取全量业务数据，也不生成论文结果。`unittest discover` 在 `code/tests` 下寻找测试文件，验证标准化、候选生成、地理计算、标签状态、遮蔽和 split 等基础函数。实际结果为 16 项测试通过；例如测试会验证 `龙湖花园一期` 的名称标准化、候选 `b1` 能被名称通道召回，以及集合阈值 `0.72` 能输出分数 `0.8` 的候选。这里的 `q`/`b1` 是测试代码中人工构造的 fixture，不是业务数据。该命令把源码行为转换成可重复的“代码契约”，失败时后续资产不能视为可靠。
 
-#### 3.7.2 命令二：12 条样本冒烟测试（测试）
+#### 3.3.2 命令二：12 条样本冒烟测试（测试）
 
 ```text
 py code/smoke_test.py --sample-size 12
@@ -171,7 +146,7 @@ py code/smoke_test.py --sample-size 12
 
 对当前 `12 -> 48` 的运行，每条样本 query 会从这 48 条 candidate 中得到候选池，再为每个候选产生 `candidate_id`、`probability`、特征和 `recall_sources`。命令输出 `task=A`、实际 sample size、candidate rows、pair rows 和警告 `unknown is not confirmed_empty`，并把汇总写到 `code/sample_output/sample_report.json`。这一命令确认“原始文件 -> 统一记录 -> 候选 -> 特征 -> 集合”的数据类型和字段能贯通，但它不是正式指标。
 
-#### 3.7.3 命令三：生成小样本金标准资产（测试）
+#### 3.3.3 命令三：生成小样本金标准资产（测试）
 
 ```text
 py code/build_evaluation_assets.py \
@@ -193,7 +168,7 @@ code/_smoke/evaluation_assets/
 
 对真实 query `1680855546638295042`，如果它在这 12 条 query 和前 20 条 mapping 范围内，`gold_pairs.csv` 会把 mapping 的每一条 pair 变成一行，并保留 `match_type`、`source`、`confidence`、距离和备注；`gold_sets.csv` 会把该 query 的两个 candidate ID 聚合为一个 JSON 集合。`evaluation_queries.csv` 则写 `complete_positive_set`、gold 数量、provenance 和 coordinate status。若 query 不在有限范围，代码会写 `unknown`，而不是假造空集。`manifest.json` 还保存输入文件 SHA-256、读取限制和 mapping 重复检查，因此小样本阶段能确认标签政策和输出结构。
 
-#### 3.7.4 命令四：审计并锁定外源数据 POI与行政地理，生成sha256指纹（正式资产准备）
+#### 3.3.4 命令四：审计并锁定外源数据 POI与行政地理，生成sha256指纹（正式资产准备）
 
 ```text
 py code/audit_geo_assets.py --output-dir code/geo_assets
@@ -206,7 +181,7 @@ py code/audit_geo_assets.py --output-dir code/geo_assets
 当前报告中的汇总结果为 POI 12,042 条、可信 9,451 条、重复键 0 个，行政区划记录 1,094 条。
 
 
-#### 3.7.5 命令五：并查集区分实体并划分数据集（正式资产准备）
+#### 3.3.5 命令五：并查集区分实体并划分数据集（正式资产准备）
 
 ```text
 py code/build_entity_splits.py \
@@ -250,7 +225,7 @@ test                            ← 2 号组整体被分到 test数据集（划�
 答：看那 4 个 2 queries + 1 candidate 的簇——同一个房源被两个小区都标成了 gold。如果按 pair 随机切，完全可能出现：query A 和这个房源在 train（模型见到这条正例），query B 和同一个房源在 test（模型又被要求再判一次）。模型等于背过了这个房源的名字和坐标，test 指标虚高，而且这种泄漏从结果上看不出来。
 
 
-#### 3.7.6 命令六：构造train/vali/test的负例 并向量化（正式资产准备）
+#### 3.3.6 命令六：构造train/vali/test的负例 并向量化（正式资产准备）
 
 ```text
 py code/build_pair_features.py \
@@ -319,7 +294,7 @@ pairs_test.csv        # 1,835 rows
 feature_manifest.json # 只记字段白名单、输入哈希、负例政策，不存任何向量
 ```
 
-#### 3.7.7 命令七：四档遮蔽 跑模型
+#### 3.3.7 命令七：四档遮蔽 跑模型
 
 ```text
 py code/run_full_library_experiment.py \
@@ -336,7 +311,7 @@ py code/run_full_library_experiment.py \
 
 用 pairs_train.csv 训练、用 pairs_validation.csv 定阈值，然后让 432 个物理实体的 test query 各自对全部 3,260 个pair候选打分，按阈值切成预测集合，最后算指标；rho = 0 / 0.3 / 0.6 / 1.0 四档 × 7 个方法，共 28 次独立运行（每次运行一次）。
 **1.** 四挡遮蔽：实体级别的遮蔽，只要这个query或者candidate被遮蔽了，就固定隐去这一行14维向量中的name_exact和name_similarity列（由命令六计算得出）。四挡指的是rho为四个数值时，按各自的概率隐去各自数量的行的这两列。pairs_train.csv永远是未遮蔽版本，遮蔽只发生在实验运行时的内存里。
-**2.** 用遮蔽后的trian训练：输入 14 维数值特征，一共用了7个方法进行训练，输出正类概率。
+**2.** 用遮蔽后的训练集训练：输入 14 维数值特征，实际运行表中 1–7 共 7 个方法并输出正类概率；8–12 为补充对照，尚未在完整候选库上运行。
 
 | # | 方法 | 类型 | 用到的特征 |
 |---|---|---|---|
@@ -347,29 +322,34 @@ py code/run_full_library_experiment.py \
 | 5 | **Full Model** | 学习 | 与 4 配置完全相同 |
 | 6 | E2 remove POI | 学习 | 与 3 配置完全相同 |
 | 7 | E4 structure-only | 学习 | 名字/地址/街道/类型全部置 0 |
+| 8 | 规范化字段规则（未做实验） | 规则 | 非神经规则基线：规范化字段加权 |
+| 9 | 距离/行政规则（未做实验） | 规则 | 空间与粗粒度行政基线 |
+| 10 | 逻辑回归 pair classifier（完整候选库未做实验） | 学习 | 成对级已运行，完整候选库尚未纳入 |
+| 11 | LightGBM + POI + 行政中心（未做实验） | 学习 | 在当前 Full Model 上接入行政区划中心特征 |
+| 12 | 原始 LightGCN（未做实验） | 图模型 | 图传播附加对照，只作 transductive 结果 |
 
 **3.** validation定阈值：因为F1等指标的计算过程需要知道预测为正的候选数具体有多少，而模型并不是输出的正负，而是概率，所以才需要计算阈值tau，大于tau就是正，小于就是负。阈值怎么计算？
 
-把433 个 validation的 query × 3,260 个候选=得到的 1,411,580 组query和candidate，即 1,411,580个分数放到20,000个桶里面，第一个桶装载1/20000 = 0.00005 ，即0~0.00005的概率，第二个桶装载0.00005~0.00010 这个分段的概率，这个方法叫 “最大 F1 阈值法”。分别累计正例和负例落在每个桶里的数量，从高分往低分扫，每降低一次门槛就多纳入一批分数，下面以小数点后两位数的tau距离（实际是小数点后5位数）：
+把433 个 validation的 query × 3,260 个候选=得到的 1,411,580 组query和candidate，即 1,411,580个分数放到20,000个桶里面，第一个桶装载1/20000 = 0.00005 ，即0 ~ 0.00005的概率，第二个桶装载0.00005 ~ 0.00010 这个分段的概率，这个方法叫 “最大 F1 阈值法”。分别累计正例和负例落在每个桶里的数量，从高分往低分扫，每降低一次门槛就多纳入一批分数，下面以小数点后两位数的tau距离（实际是小数点后5位数）：
 
 | tau（切点） | 判为正的 | TP | FP | FN | 全局 F1 |
 |---|---|---|---|---|---|
 | > 0.95 | 无 | 0 | 0 | 5 | 0 |
-| 0.95 | 1 个 | 1 | 0 | 4 | 0.333 |
-| 0.90 | 2 个 | 2 | 0 | 3 | 0.571 |
-| 0.85 | +1 负例 | 2 | 1 | 3 | 0.500 |
-| 0.80 | +1 正例 | 3 | 1 | 2 | 0.667 |
-| 0.60 | +1 负例 | 3 | 2 | 2 | 0.600 |
-| 0.40 | +1 正例 | 4 | 2 | 1 | 0.727 |
-| 0.30 | +1 正例 | 5 | 2 | 0 | 0.833 ← 这里最高 |
-| 0.20 | +1 负例 | 5 | 3 | 0 | 0.769 |
-| 0.10 | +1 负例 | 5 | 4 | 0 | 0.714 |
+| > 0.95 | 1 个 | 1 | 0 | 4 | 0.333 |
+| > 0.90 | 2 个 | 2 | 0 | 3 | 0.571 |
+| > 0.85 | +1 负例 | 2 | 1 | 3 | 0.500 |
+| > 0.80 | +1 正例 | 3 | 1 | 2 | 0.667 |
+| > 0.60 | +1 负例 | 3 | 2 | 2 | 0.600 |
+| > 0.40 | +1 正例 | 4 | 2 | 1 | 0.727 |
+| > 0.30 | +1 正例 | 5 | 2 | 0 | 0.833 ← 这里最高 |
+| > 0.20 | +1 负例 | 5 | 3 | 0 | 0.769 |
+| > 0.10 | +1 负例 | 5 | 4 | 0 | 0.714 |
 
 所以最后tau就是0.833。注意validation 被用了两次：既做早停监控，又用来选阈值，阈值指标存在轻微乐观偏差，应说明这是"validation-tuned"而非"test-tuned"。
 
 **4.** test预测打分：按照上一步validation的阈值tau 直接进行切割来计算F1等指标。test 不重新训练，validation 和 test 共用同一个已训练模型，test 阶段只做"打分 + 用 validation 定的阈值切集合"。 预测主要计算三个指标Precision	Recall	F1。全量汇总写入 `full_candidate_comparison.csv`
 
-#### 3.7.8 命令七产生的正式结果文件如何被使用
+#### 3.3.8 命令七产生的正式结果文件如何被使用
 
 第七步最终产生：
 
@@ -385,21 +365,9 @@ code/full_library_results_disk_v4/
 
 `full_candidate_comparison.csv` 用于主对比和消融表；`rho_0.6_Full_Model_query_sets.csv` 这类文件用于逐 query 错误分析；`full_candidate_manifest.json` 用于核对 query 数、candidate 数、rho、seed、split seed、POI 哈希和 `data_fingerprint`（输入 pair 资产的指纹，缓存据此失效）。注意：结果目录为 `code/full_library_results_disk_v4/`；特征修复前的旧结果已删除，不再保留对照基线。这里的四档完整库结果是 `fixed_pool` 排序诊断，候选池固定为全量 3,260 条，因此不能代替名称遮蔽后重新生成名称召回索引的 `end_to_end` 候选召回实验。`unknown` query 仍不等于 `confirmed_empty`，所以这些文件也不能单独证明严格业务拒识率。
 
-### 3.8 结果资产和复现顺序
+### 3.4 结果资产和复现顺序
 
-从仓库根目录按以下顺序运行：
-
-```text
-py -m unittest discover -s code/tests -v
-py code/smoke_test.py --sample-size 12
-py code/build_evaluation_assets.py --query-limit 12 --candidate-limit 48 --mapping-limit 20 --output-dir code/_smoke/evaluation_assets
-py code/audit_geo_assets.py --output-dir code/geo_assets
-py code/build_entity_splits.py --output-dir code/split_manifest_full --version split-v1
-py code/build_pair_features.py --output-dir code/training_assets_full_v4 --split-manifest code/split_manifest_full/split_manifest.json --candidate-source full --negative-ratio 3 --split-seed 13
-py code/run_full_library_experiment.py --data-dir code/training_assets_full_v4 --cache-dir .audit_work/full_candidate_cache_v4 --output-dir code/full_library_results_disk_v4 --mask-ratios 0,0.3,0.6,1.0 --seed 42 --split-seed 13
-```
-
-结果、manifest、query 集合和审计文件必须与 `rho`、split seed、数据版本和候选库协议一同保存。
+按 §3.3 的命令一至七依次执行；结果、manifest、query 集合和审计文件必须与 `rho`、split seed、数据版本和候选库协议一同保存。
 
 ## 4 两个任务的定位
 
@@ -412,7 +380,6 @@ py code/run_full_library_experiment.py --data-dir code/training_assets_full_v4 -
 | 关系形态 | 非 1:1；query 侧最多 5 个 pair，平均 1.05 pair/query |
 | 召回主字段 | 整体项目名称/小区名称 |
 | 实体判定字段 | 期次、组团、地址、行政区划、可信空间证据和结构字段 |
-| 当前 mapping 未覆盖 query | 5,899 条；未覆盖不等于 `confirmed_empty` |
 | 研究作用 | 独立业务表条件下的跨源地点解析 |
 
 A 的自然名称一致率很高，必须单独报告名称遮蔽、同名异地、近距离异地和坐标不可用切片，避免把名称捷径当成物理地点理解。
@@ -475,8 +442,6 @@ coordinate_status
 - `original_annotation`：原始业务标注；
 - `external_derived`：依赖外源地理结果形成或补全；
 - `independent_review`：不展示同一模型输入中的外源证据而完成的独立复核。
-
-2,709 个原始标注 pair 与 317 个外源补全 pair 必须分别报告。`2,709 + 317` 是 pair 数，不是 query 数；query 数按 pair 去重后统计。
 
 ### 5.2 A 任务的全量核算
 
@@ -693,21 +658,9 @@ Precision 的分母是预测为链接的 query 数，Recall 的分母是真实�
 
 旧版 `P = R = Hit@K` 的评估定义废弃。Hit@K 只能作为附录检索诊断，不能作为主 Precision、Recall 和 F1。
 
-## 8 方法对照与消融
+## 8 消融实验
 
-所有方法使用相同候选池、实体划分、mask、阈值选择协议和输出定义。
-
-| 方法 | 作用 |
-|---|---|
-| 主字段精确匹配 | 主字段可见时的强基线，不能作为系统最终规则 |
-| 规范化字段规则 | 非神经规则基线 |
-| 距离/行政规则 | 空间与粗粒度行政基线 |
-| TF-IDF Cosine | 纯文本相似度基线 |
-| 逻辑回归 pair classifier | 可解释的成对模型 |
-| LightGBM text/structure | 无 POI 对照模型 |
-| LightGBM + POI | POI 增量模型 |
-| LightGBM + POI + 行政中心 | Full Model 主模型 |
-| 原始 LightGCN | 图传播附加对照，只作 transductive 结果 |
+全部方法使用相同候选池、实体划分、mask、阈值选择协议和输出定义；12 个方法的完整对照表见 §3.3.7（其中 8–12 尚未在完整候选库上运行）。
 
 消融统一编号：
 
@@ -739,22 +692,19 @@ Precision 的分母是预测为链接的 query 数，Recall 的分母是真实�
 
 ## 10 当前风险与结论边界
 
-1. A 的名称一致率为 99.6%，自然集可能被主字段捷径主导；必须以遮蔽和困难集检验物理地点证据。
+1. A 的名称一致率很高（见 §2），自然集可能被主字段捷径主导；必须以遮蔽和困难集检验物理地点证据。
 2. A 的自然名称变体只有 15 条，不能据此声称自然异名解析已经充分验证。
 3. B 与 A 同级评测但必须分别报告；B 的同行字段同值、重复地址和已修复 ID 不能被解释为独立跨源泛化证据。
 4. 外源 POI 是由名称/地址派生的地理证据，进入 Full Model 但必须记录标签、候选和特征用途并按 provenance 分层。
 5. 行政区划中心是粗粒度位置，不是行政边界，也不是精确地点坐标。
 6. 坐标不可用样本不能静默删除，至少要单独报告文本/结构匹配和拒识结果。
 7. 未映射 query 和 unknown 不能自动作为 confirmed_empty；严格拒识结论需有独立排除证据。
-8. 如果 Hard Challenge 只在测试出现，它是 OOD stress test；低分不能直接解释为一般模型能力不足。
 
 ## 11 可复现性
 
 - 固定随机种子和软件环境；
-- 版本化原始数据、gold、候选池、split、mask、特征配置和模型配置；
-- 保存外源 API 原始响应、查询文本、采集日期、坐标系、许可与配额信息；
-- 保存每次运行的配置哈希、数据哈希、split manifest、候选池版本、阈值和校准器；
-- 所有结果注明任务、split 协议、rho、query/pair 基数、gold provenance 和坐标可信度切片。
+- 所有结果注明任务、split 协议、rho、query/pair 基数、gold provenance 和坐标可信度切片；
+- 数据版本、外源快照与每次运行的哈希留痕要求见 §6.3 和 §6.4。
 
 ## 12 运行入口与代码结构
 
@@ -762,7 +712,7 @@ Precision 的分母是预测为链接的 query 数，Recall 的分母是真实�
 
 - Python 3.12；核心单元测试只用标准库，完整模型实验需要 LightGBM 4.x：`py -m pip install lightgbm`。
 - 原始数据默认从 `数据/` 读取，路径与字段映射集中在 `code/er/config.py`；所有命令都不修改原始数据。
-- 全部命令在仓库根目录执行；完整执行顺序见 §3.8，本节只补 §3.8 未包含的入口。
+- 全部命令在仓库根目录执行；完整执行顺序见 §3.4，本节只补 §3.4 未包含的入口。
 
 ### 12.2 补充命令
 
