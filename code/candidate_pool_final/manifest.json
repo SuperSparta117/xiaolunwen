@@ -1,0 +1,49 @@
+{
+  "candidate_pool_version": "candidate-v1",
+  "task_id": "A",
+  "protocol": "natural",
+  "mask_counts": {
+    "query_masked": 0,
+    "candidate_masked": 0
+  },
+  "k": 20,
+  "source_limits": {
+    "query": null,
+    "candidate": null,
+    "mapping": null
+  },
+  "input_files": {
+    "C:\\Users\\liuming\\Documents\\MyVscodeProject\\xiaolunwen\\数据\\A_物业处_的目标输出数据：小区基础信息数据.sql": "cbdaf60043b8ae85be0821bc922a40bcb0ceaa3492bb08da29e7c00cede85b34",
+    "C:\\Users\\liuming\\Documents\\MyVscodeProject\\xiaolunwen\\数据\\A_房屋交易中心_合并数据.csv": "98436e59b2e36a8f75eb7e1f19d74e3b97f835171b833d7d90b88d0857bec9ae",
+    "C:\\Users\\liuming\\Documents\\MyVscodeProject\\xiaolunwen\\数据\\A_mission_匹配映射_v2.csv": "8a4bee5c0d9dbf3d15041e346f055495a59d3b9198b7e4f3877a1ee1a8e7caa5"
+  },
+  "output_file": {
+    "path": "candidate_pool_final\\candidate_pool.csv",
+    "rows": 174137,
+    "sha256": "89e98de2464c9702659bb5654b7817a29503f19309b612069ecab6de3cfc44ba"
+  },
+  "recall_file": {
+    "path": "candidate_pool_final\\candidate_recall_at_k.csv",
+    "rows": 18,
+    "sha256": "5d3b5f190250a790cf00bc26f90542aba6dd6634dd12382230f21892270d1d41"
+  },
+  "channel_recall_file": {
+    "path": "candidate_pool_final\\candidate_recall_by_channel.csv",
+    "rows": 72,
+    "sha256": "2570304b7afaf32d32b36ff818c4add92e0c6725e66f5e5424950bf6bea8588b"
+  },
+  "counts": {
+    "query_rows": 8782,
+    "candidate_rows": 3260,
+    "pool_rows": 174137,
+    "gold_queries_in_sample": 2883,
+    "gold_queries_recalled": 2883,
+    "gold_queries_not_recalled": 0,
+    "unknown_queries_not_counted_as_negative": 5899
+  },
+  "policy": {
+    "unknown_is_negative": false,
+    "recall_failure_is_ranking_failure": false,
+    "gold_set_definition": "mapping pairs available in the frozen mapping asset"
+  }
+}

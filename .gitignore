@@ -1,0 +1,11 @@
+# 运行时缓存与生成物，不进版本库
+.audit_work/
+code/_smoke/
+code/sample_output/
+code/full_library_results_disk/
+code/full_library_results_disk_v4/
+code/pair_model_results/
+
+# Python
+__pycache__/
+*.pyc
