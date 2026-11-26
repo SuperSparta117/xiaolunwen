@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-CACHE_VERSION = "full-library-cache-v2"
+CACHE_VERSION = "full-library-cache-v3"
 
 
 def run_key(*parts: object) -> str:

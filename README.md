@@ -30,14 +30,15 @@
 
 三个阶段分别评估。候选没有被召回属于候选生成失败，不能混同为排序模型失败。
 
-围绕这三个阶段，本文报告两个独立实验，分别评估、不合并总分：
+围绕“候选召回 → 成对匹配 → 集合预测与拒识”三个阶段，本文把评估集中在一个正式协议上：**全库候选集合评估**。每个 test query 对全部 3,260 个候选打分，按 validation 阈值输出集合 `S(q)`，再按集合计算 Precision / Recall / F1。该协议同时覆盖排序与集合/拒识两个环节；不另外构造独立成对测试集，也不把成对判别指标与集合指标混合报告。
 
-| 实验 | 评估对象 | 输出口径 | 章节 |
-|---|---|---|---|
-| 实验一 | 每个 test query × 全部 3,260 个候选 | 按 validation 阈值输出集合 | §4 |
-| 实验二 | 1,835 个构造 pair（460 正 / 1,375 负） | 逐对二分类 | §5 |
-
-两者口径不同（集合输出 vs 成对二分类），指标不可合并或横向比较；实验二只用于诊断名称遮蔽下的成对判别与 POI 增量，不作为最终实体解析主结果。
+| 项 | 内容 |
+|---|---|
+| 评估对象 | 432 个 test query × 全部 3,260 个候选 = 1,408,320 个 query-candidate pair |
+| 输出 | 每个 query 一个候选集合 `S(q)`（可以为空，表示拒识） |
+| 指标 | pair-level（micro）Precision / Recall / F1，另报告覆盖率与正例误拒率 |
+| 阈值 | 仅由 validation 完整候选集确定，test 不参与 |
+| 遮蔽 | 名称字段四档遮蔽 `rho ∈ {0, 0.3, 0.6, 1.0}` |
 
 ### 1.4 论文主张边界
 
@@ -196,7 +197,7 @@ query 侧和 candidate 侧执行相同的遮蔽协议。两种协议复用同一
 
 ## 3 方法方案
 
-本项目最终采用“统一记录视图 -> 多路候选池 -> 成对特征 -> 成对模型 -> 验证集阈值 -> 集合输出”的六步流程。实现过程中对原计划作了两项重要工程化调整：完整候选库评分改为逐 query、逐候选分批计算并持久化到可恢复的磁盘 score cache（`.audit_work/full_candidate_cache_v5`），避免将 432 × 3,260 的预测字典同时留在内存；名称遮蔽实验同时保留 `fixed_pool` 诊断协议，并将名称遮蔽后的候选召回作为单独的 `end_to_end` 协议，避免混淆“排序退化”和“候选生成退化”。
+本项目最终采用“统一记录视图 -> 多路候选池 -> 成对特征 -> 成对模型 -> 验证集阈值 -> 集合输出”的六步流程。实现过程中对原计划作了两项重要工程化调整：完整候选库评分改为逐 query、逐候选分批计算并持久化到可恢复的磁盘 score cache（`.audit_work/full_candidate_cache_v6`），避免将 432 × 3,260 的预测字典同时留在内存；名称遮蔽实验同时保留 `fixed_pool` 诊断协议，并将名称遮蔽后的候选召回作为单独的 `end_to_end` 协议，避免混淆“排序退化”和“候选生成退化”。
 
 ```text
 ① 异构输入 + 字段映射
@@ -446,70 +447,44 @@ pairs_test.csv        # 1,835 rows
 feature_manifest.json # 只记字段白名单、输入哈希、负例政策，不存任何向量
 ```
 
-#### 3.3.7 命令七：四档遮蔽 跑模型
+#### 3.3.7 命令七：四档遮蔽跑主实验
 
 ```text
 py code/run_full_library_experiment.py \
   --data-dir code/training_assets_full_v5 \
-  --cache-dir .audit_work/full_candidate_cache_v5 \
-  --output-dir code/full_library_results_disk_v5 \
+  --cache-dir .audit_work/full_candidate_cache_v6 \
+  --output-dir code/full_library_results_disk_v6 \
   --mask-ratios 0,0.3,0.6,1.0 \
   --seed 42 \
   --split-seed 13
 ```
 
-
 参数含义如下：`--data-dir` 指向第六步的训练/validation/test pair 资产；`--cache-dir` 指向可恢复的磁盘 score cache；`--output-dir` 保存最终比较表和 query 集合；`--mask-ratios` 依次运行不遮蔽、遮蔽 30%、60% 和 100%；`--seed 42` 固定实体级名称遮蔽；`--split-seed 13` 选择第五步的 split。
 
-用 pairs_train.csv 训练、用 pairs_validation.csv 定阈值，然后让 432 个物理实体的 test query 各自对全部 3,260 个pair候选打分，按阈值切成预测集合，最后算指标；rho = 0 / 0.3 / 0.6 / 1.0 四档 × 8 个方法，共 32 次独立运行（每次运行一次）。
-**1.** 四挡遮蔽：实体级别的遮蔽，只要这个query或者candidate被遮蔽了，就固定隐去这一行16维向量中的name_exact和name_similarity列（由命令六计算得出）。四挡指的是rho为四个数值时，按各自的概率隐去各自数量的行的这两列。pairs_train.csv永远是未遮蔽版本，遮蔽只发生在实验运行时的内存里。
-**2.** 用遮蔽后的训练集训练：输入 16 维数值特征，实际运行表中 1–8 共 8 个方法并输出正类概率；9–13 为补充对照，尚未在完整候选库上运行。
+用 pairs_train.csv 训练、用 pairs_validation.csv 定阈值，然后让 432 个物理实体的 test query 各自对全部 3,260 个候选打分，按阈值切成预测集合，最后算指标；rho = 0 / 0.3 / 0.6 / 1.0 四档 × 5 个配置，共 20 次独立运行。
 
-| # | 方法 | 类型 | 用到的特征 |
+**1.** 四挡遮蔽：实体级别的遮蔽，只要这个 query 或者 candidate 被遮蔽了，就固定隐去这一行 16 维向量中的 name_exact 和 name_similarity 列。四挡指 rho 为四个数值时，按各自的概率隐去各自数量的行的这两列。`pairs_train.csv` 永远是未遮蔽版本，遮蔽只发生在实验运行时的内存里。
+
+**2.** 用遮蔽后的训练集训练：输入 16 维数值特征，本命令运行 5 个配置：
+
+| # | 配置 | 类型 | 用到的特征 |
 |---|---|---|---|
 | 1 | 主字段精确匹配 | 规则 | 只取 name_exact（0/1）当分数 |
-| 2 | TF-IDF-like Cosine | 规则 | 只取 name_similarity（字符二元组 Jaccard） |
-| 3 | LightGBM Text/Structure | 学习 | 文本开、POI 关、行政一致性开、行政中心关 |
-| 4 | LightGBM + POI | 学习 | 文本 + POI + 行政一致性，行政中心关 |
-| 5 | **Full Model** | 学习 | 在 4 的基础上加入两维行政中心特征 |
-| 6 | E1 remove admin center | 学习 | 与 4 配置相同（去掉行政中心两维） |
-| 7 | E2 remove POI | 学习 | 与 3 配置相同 |
-| 8 | E4b 全特征关闭 | 学习 | 文本/POI/行政/行政中心全关，16 维全 0（退化对照） |
-| 9 | 规范化字段规则（未做实验） | 规则 | 非神经规则基线：规范化字段加权 |
-| 10 | 距离/行政规则（未做实验） | 规则 | 空间与粗粒度行政基线 |
-| 11 | 逻辑回归 pair classifier（完整候选库未做实验） | 学习 | 成对级已运行，完整候选库尚未纳入 |
-| 12 | 原始 LightGCN（未做实验） | 图模型 | 图传播附加对照，只作 transductive 结果 |
-| 13 | 随机负采样（未做实验） | 学习 | 特征同 Full Model，仅把分层困难负例改为随机负采样 |
+| 2 | **Full Model** | 学习 | 文本 + POI + 行政一致性 + 两维行政中心 |
+| 3 | E1 remove admin center | 学习 | Full Model 去掉两维行政中心 |
+| 4 | E2 remove POI | 学习 | Full Model 去掉 POI 距离/分档/高德区县匹配，保留行政中心 |
+| 5 | E4b 全特征关闭 | 学习 | 文本/POI/行政/行政中心全关，16 维全 0（退化对照） |
 
-**3.** validation定阈值：因为F1等指标的计算过程需要知道预测为正的候选数具体有多少，而模型并不是输出的正负，而是概率，所以才需要计算阈值tau，大于tau就是正，小于就是负。阈值怎么计算？
+四个外部基线（Fellegi-Sunter、BM25F、BGE-M3、Ditto）由命令八单独运行，使用同一批候选、同一 split、同一遮蔽标记和同一 validation 阈值选择。
 
-把433 个 validation的 query × 3,260 个候选=得到的 1,411,580 组query和candidate，即 1,411,580个分数放到20,000个桶里面，第一个桶装载1/20000 = 0.00005 ，即0 ~ 0.00005的概率，第二个桶装载0.00005 ~ 0.00010 这个分段的概率，这个方法叫 “最大 F1 阈值法”。分别累计正例和负例落在每个桶里的数量，从高分往低分扫，每降低一次门槛就多纳入一批分数，下面以小数点后两位数的tau距离（实际是小数点后5位数）：
+**3.** validation 定阈值：阈值计算方式与之前一致——把 validation 完整候选集的分数放进 20,000 个桶，累计正负例数量，从高到低扫描确定最大 F1 切点。validation 被用了两次（早停监控 + 选阈值），因此阈值指标存在轻微乐观偏差，应说明这是 validation-tuned 而非 test-tuned。
 
-| tau（切点） | 判为正的 | TP | FP | FN | 全局 F1 |
-|---|---|---|---|---|---|
-| > 0.95 | 无 | 0 | 0 | 5 | 0 |
-| > 0.95 | 1 个 | 1 | 0 | 4 | 0.333 |
-| > 0.90 | 2 个 | 2 | 0 | 3 | 0.571 |
-| > 0.85 | +1 负例 | 2 | 1 | 3 | 0.500 |
-| > 0.80 | +1 正例 | 3 | 1 | 2 | 0.667 |
-| > 0.60 | +1 负例 | 3 | 2 | 2 | 0.600 |
-| > 0.40 | +1 正例 | 4 | 2 | 1 | 0.727 |
-| > 0.30 | +1 正例 | 5 | 2 | 0 | 0.833 ← 这里最高 |
-| > 0.20 | +1 负例 | 5 | 3 | 0 | 0.769 |
-| > 0.10 | +1 负例 | 5 | 4 | 0 | 0.714 |
-
-所以最后tau就是0.833。注意validation 被用了两次：既做早停监控，又用来选阈值，阈值指标存在轻微乐观偏差，应说明这是"validation-tuned"而非"test-tuned"。
-
-**4.** test预测打分：按照上一步validation的阈值tau 直接进行切割来计算F1等指标。test 不重新训练，validation 和 test 共用同一个已训练模型，test 阶段只做"打分 + 用 validation 定的阈值切集合"。
-
-模型须能对新记录编码和推理；ID、已有关系、索引或图结构的使用方式必须在协议中写明。TF-IDF/SVD 只在 train 拟合；训练图只含 train gold 边，validation/test gold 边和测试标签派生边不得入图。每次运行前后检查：ID/行号/索引未作特征、同一实体未跨 split、train/validation/test gold 无交集、预处理符合 inductive/transductive 声明，并保存数据版本、配置、split manifest、候选池版本、外源快照哈希与阈值配置。 预测主要计算三个指标Precision	Recall	F1。全量汇总写入 `full_candidate_comparison.csv`
+**4.** test 预测打分：用 validation 阈值切 test 候选集合并计算指标，test 不参与调参。
 
 #### 3.3.8 命令七产生的正式结果文件如何被使用
 
-第七步最终产生：
-
 ```text
-code/full_library_results_disk_v5/
+code/full_library_results_disk_v6/
   full_candidate_comparison.csv
   full_candidate_manifest.json
   rho_0_*_query_sets.csv
@@ -518,157 +493,214 @@ code/full_library_results_disk_v5/
   rho_1_*_query_sets.csv
 ```
 
-`full_candidate_comparison.csv` 用于主对比和消融表；`rho_0.6_Full_Model_query_sets.csv` 这类文件用于逐 query 错误分析；`full_candidate_manifest.json` 用于核对 query 数、candidate 数、rho、seed、split seed、POI 哈希和 `data_fingerprint`（输入 pair 资产的指纹，缓存据此失效）。注意：结果目录为 `code/full_library_results_disk_v5/`；v4 结果已归档；当前表格为 v5 结果。这里的四档完整库结果是 `fixed_pool` 排序诊断，候选池固定为全量 3,260 条，因此不能代替名称遮蔽后重新生成名称召回索引的 `end_to_end` 候选召回实验。`unknown` query 仍不等于 `confirmed_empty`，所以这些文件也不能单独证明严格业务拒识率。
+`full_candidate_comparison.csv` 用于主对比和消融表；`rho_0.6_Full_Model_query_sets.csv` 这类文件用于逐 query 错误分析；`full_candidate_manifest.json` 用于核对 query 数、candidate 数、rho、seed、split seed、POI 哈希和 `data_fingerprint`。这里的四档完整库结果是 `fixed_pool` 排序诊断，候选池固定为全量 3,260 条，因此不能代替名称遮蔽后重新生成名称召回索引的 `end_to_end` 候选召回实验。`unknown` query 仍不等于 `confirmed_empty`，所以这些文件也不能单独证明严格业务拒识率。
+
+#### 3.3.9 命令八：运行外部基线
+
+```text
+py code/run_baselines_full.py \
+  --data-dir code/training_assets_full_v5 \
+  --output-dir code/baseline_results_full \
+  --cache-dir .audit_work/baseline_cache \
+  --methods fs,bm25f,bge,ditto \
+  --ratios 0,0.3,0.6,1.0
+```
+
+四个外部基线都在全库候选协议上运行：对每个 query 评分全部 3,260 个候选，输出分数矩阵，再用 validation 阈值切集合、用 test 计算指标。
+
+| 基线 | 输入与打分口径 |
+|---|---|
+| Fellegi-Sunter | 名称/地址（字符二元组相似度分级）、区县、街道、类型作为比较字段；用训练集估计匹配/非匹配条件下的比较级概率，按对数似然比汇总 |
+| BM25F | 名称/地址/街道/区县/类型作为独立字段索引；字段权重固定，字符二元组词项 |
+| BGE-M3 | `BAAI/bge-m3` 稠密向量，名称/地址/区县/街道/类型序列化后编码，cosine 相似度打分 |
+| Ditto | `hfl/chinese-roberta-wwm-ext` cross-encoder，字段序列化后拼接，二分类微调，输出匹配概率 |
+
+四个基线只使用名称/地址/区县/街道/类型字段，不使用 POI 外部资产；名称遮蔽时名称字段置空（与 Full Model 的名称特征置零对应）。每个 rho 下四个基线都使用与 Full Model 相同的遮蔽训练集重训（BGE-M3 不训练，只对遮蔽文本重新编码），阈值同样只由 validation 选择。把 POI/行政地理证据加入 Ditto 输入的重训版见 §5。
 
 ### 3.4 结果资产和复现顺序
 
-按 §3.3 的命令一至七依次执行；结果、manifest、query 集合和审计文件必须与 `rho`、split seed、数据版本和候选库协议一同保存。
+按 §3.3 的命令一至八依次执行；结果、manifest、query 集合和审计文件必须与 `rho`、split seed、数据版本和候选库协议一同保存。
 
-## 4 实验一：完整候选库集合评估
+## 4 任务A实验：完整候选库集合评估
 
 ### 4.1 设置
 
-以下结果来自 A 任务完整候选库穷举评估，覆盖每个测试 query 的全部 3,260 个房交候选，而不是有限构造负例。测试集为 432 个已映射正例 query，共 1,408,320 个 query-candidate pair；另外 5,899 个未映射 query 保持 `unknown` 并排除。映射完整性假设下，未列入现有 mapping 的候选暂按负例计，因此这些指标是条件性评估，不能当作已独立确认的负例结论。
+以下结果来自 A 任务完整候选库穷举评估，覆盖每个测试 query 的全部 3,260 个房交候选。测试集为 432 个已映射正例 query，共 1,408,320 个 query-candidate pair；另外 5,899 个未映射 query 保持 `unknown` 并排除。映射完整性假设下，未列入现有 mapping 的候选暂按负例计，因此这些指标是条件性评估，不能当作已独立确认的负例结论。
 
 - 训练资产：`code/training_assets_full_v5`
-- 完整候选库结果：`code/full_library_results_disk_v5/full_candidate_comparison.csv`
+- 完整候选库结果：`code/full_library_results_disk_v6/full_candidate_comparison_all.csv`
+- 外部基线结果：`code/baseline_results_full/baseline_comparison.csv`
 - 名称遮蔽比例：`rho ∈ {0, 0.3, 0.6, 1.0}`；实体级确定性遮蔽，seed=42
 - split：gold 图连通分量划分，seed=13；validation 433 个正例 query，test 432 个正例 query
 - 各模型阈值仅依据 validation 完整候选集选择
-- Full Model 在 LightGBM + POI 基础上加入两维行政中心特征；E1 与 LightGBM + POI 使用同一组特征配置
+- **主模型**：Full Model = LightGBM + 文本/结构特征 + POI + 两维行政中心特征
+- **外部基线**：规范化主字段精确匹配、Fellegi-Sunter、BM25F、BGE-M3、Ditto（中文 RoBERTa）；它们只使用名称/地址/区县/街道/类型字段，**不使用 POI 外部资产**。Full Model 的优势因此包含外部地理证据，正文按此口径解释（Ditto 加入 GEO 证据的重训版单独见 §5）
+- **消融**：E1（去掉两维行政中心）、E2（去掉 POI、保留行政中心）、E4b（全特征关闭，退化对照）
 
-名称遮蔽作用于训练、validation 和 test 的名称成对特征。该完整候选库实验仍是 `fixed_pool` 排序/集合输出评估，不等于名称遮蔽后同步重新生成名称召回索引的 `end_to_end` 实验。特别是 `rho=1.0` 的精确匹配基线会对每个候选给出相同的零分，validation 选出的阈值因此可能输出全部候选，不能把其 100% recall 解读为有区分能力。
+名称遮蔽作用于训练、validation 和 test 的名称成对特征。该实验仍是 `fixed_pool` 排序/集合输出评估，不等于名称遮蔽后同步重新生成名称召回索引的 `end_to_end` 实验。`rho=1.0` 的精确匹配基线会对每个候选给出相同的零分，validation 选出的阈值因此可能输出全部候选，不能把其 100% recall 解读为有区分能力。
 
 ### 4.2 主对比（全候选集合评估）
 
-本节是**正式的全候选库实体解析主对比**：对每个测试 query 逐一评分全部 3,260 个房交 candidate，再按 validation 阈值输出一个候选集合。负例是该 query 的完整候选库中未被 gold mapping 标注的 candidate；因此这里评估的是“一个 query 最终返回哪些 candidate”的集合质量，而不是只在预先抽取的少量 pair 上做二分类。
+本节是**正式的全候选库实体解析主对比**：6 个方法（5 个独立基线 + Full Model）对每个测试 query 逐一评分全部 3,260 个候选，再按 validation 阈值输出候选集合。负例是该 query 的完整候选库中未被 gold mapping 标注的 candidate；评估的是“一个 query 最终返回哪些 candidate”的集合质量。
 
-本节报告 4 个名称遮蔽比例 `rho`，每格为 Precision / Recall / F1（%），括号内是 pair-level TP / FP / FN。宏平均 F1 单独报告，用于体现 query 间集合质量。
+每格为 **pair-level（micro）** Precision / Recall / F1（%），不是 query-level 指标。
 
-本节是固定 3,260 候选的集合输出评估；实验二（§5）的有限负例成对分类口径不同，两表不可合并或横向比较。
-
-| 方法 | rho=0 | rho=0.3 | rho=0.6 | rho=1.0 |
+| 方法 | rho=0 P/R/F1 | rho=0.3 P/R/F1 | rho=0.6 P/R/F1 | rho=1.0 P/R/F1 |
 |---|---:|---:|---:|---:|
-| 主字段精确匹配 | 91.38 / 99.13 / 95.10 (456/43/4) | 88.66 / 47.61 / 61.95 (219/28/241) | 84.15 / 15.00 / 25.46 (69/13/391) | 0.03 / 100.00 / 0.07 (460/1,407,860/0) |
-| TF-IDF-like Cosine | 91.38 / 99.13 / 95.10 (456/43/4) | 88.66 / 47.61 / 61.95 (219/28/241) | 84.15 / 15.00 / 25.46 (69/13/391) | 0.03 / 100.00 / 0.07 (460/1,407,860/0) |
-| LightGBM Text/Structure | 94.59 / 98.91 / 96.71 (455/26/5) | 92.70 / 46.96 / 62.34 (216/17/244) | 71.43 / 17.39 / 27.97 (80/32/380) | 4.13 / 91.09 / 7.90 (419/9,727/41) |
-| LightGBM + POI | 92.74 / 100.00 / 96.23 (460/36/0) | 94.12 / 66.09 / 77.65 (304/19/156) | 95.63 / 47.61 / 63.57 (219/10/241) | 98.08 / 33.26 / 49.68 (153/3/307) |
-| Full Model | 94.59 / 98.91 / 96.71 (455/26/5) | 94.14 / 66.30 / 77.81 (305/19/155) | 95.91 / 45.87 / 62.06 (211/9/249) | 98.10 / 33.70 / 50.16 (155/3/305) |
+| **Full Model** | 94.59 / 98.91 / 96.71 | 94.14 / 66.30 / 77.81 | 95.91 / 45.87 / 62.06 | 98.10 / 33.70 / 50.16 |
+| 主字段精确匹配 | 91.38 / 99.13 / 95.10 | 88.66 / 47.61 / 61.95 | 84.15 / 15.00 / 25.46 | 0.03 / 100.00 / 0.07 |
+| Fellegi-Sunter | 94.58 / 98.70 / 96.60 | 92.77 / 47.39 / 62.73 | 92.00 / 15.00 / 25.79 | 0.03 / 100.00 / 0.07 |
+| BM25F | 89.90 / 94.78 / 92.28 | 88.19 / 45.43 / 59.97 | 40.08 / 21.09 / 27.64 | 8.72 / 37.39 / 14.14 |
+| BGE-M3 | 85.91 / 96.74 / 91.00 | 76.28 / 41.96 / 54.14 | 30.40 / 16.52 / 21.41 | 6.10 / 38.48 / 10.54 |
+| Ditto (Chinese RoBERTa) | 92.77 / 97.61 / 95.13 | 91.95 / 47.17 / 62.36 | 9.51 / 31.96 / 14.66 | 0.05 / 6.30 / 0.11 |
 
-| 方法 | rho=0 宏平均 F1 | rho=0.3 宏平均 F1 | rho=0.6 宏平均 F1 | rho=1.0 宏平均 F1 |
-|---|---:|---:|---:|---:|
-| 主字段精确匹配 | 96.56% | 47.21% | 15.34% | 0.07% |
-| TF-IDF-like Cosine | 96.56% | 47.21% | 15.34% | 0.07% |
-| LightGBM Text/Structure | 97.64% | 47.30% | 16.94% | 14.03% |
-| LightGBM + POI | 97.95% | 66.24% | 48.41% | 33.83% |
-| Full Model | 97.64% | 66.47% | 46.86% | 34.30% |
+rho=0 时最强基线为 Fellegi-Sunter（F1 96.60），Full Model 为 96.71；rho=0.3 时最强基线为 Fellegi-Sunter（F1 62.73），Full Model 为 77.81；rho=0.6 时最强基线为 BM25F（F1 27.64），Full Model 为 62.06；rho=1.0 时最强基线为 BM25F（F1 14.14），Full Model 为 50.16。
+
+需要说明：`rho=1.0` 时规则基线、Fellegi-Sunter 与 Ditto 的 validation 阈值分别退化为“输出全部候选”或“几乎不输出”，其 100%（规则/FS）与 6.30%（Ditto）的 recall 不代表有区分能力；该档比较以 F1 为准。Ditto 与 Full Model 的专项对比（含把 POI/行政地理证据直接输入 Ditto 的重训版）见 §5。
 
 ### 4.3 消融
 
+消融只改变 Full Model 的单一组件；Full Model 行复用主对比结果，不重复计数。
+
 | 消融设置 | rho=0 P/R/F1 | rho=0.3 P/R/F1 | rho=0.6 P/R/F1 | rho=1.0 P/R/F1 |
 |---|---:|---:|---:|---:|
-| Full Model | 94.59 / 98.91 / 96.71 | 94.14 / 66.30 / 77.81 | 95.91 / 45.87 / 62.06 | 98.10 / 33.70 / 50.16 |
+| **Full Model** | 94.59 / 98.91 / 96.71 | 94.14 / 66.30 / 77.81 | 95.91 / 45.87 / 62.06 | 98.10 / 33.70 / 50.16 |
 | E1 remove admin center | 92.74 / 100.00 / 96.23 | 94.12 / 66.09 / 77.65 | 95.63 / 47.61 / 63.57 | 98.08 / 33.26 / 49.68 |
-| E2 remove POI | 94.59 / 98.91 / 96.71 | 92.70 / 46.96 / 62.34 | 71.43 / 17.39 / 27.97 | 4.13 / 91.09 / 7.90 |
+| E2 remove POI | 94.59 / 98.91 / 96.71 | 93.07 / 46.74 / 62.23 | 71.43 / 17.39 / 27.97 | 4.15 / 91.96 / 7.93 |
 | E4b 全特征关闭 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 | 0.03 / 100.00 / 0.07 |
 
-E2 在 rho=0.6 下相较 Full Model 的 Recall 低 28.48 个百分点、F1 低 34.09 个百分点；rho=1.0 时差距扩大到 Recall 低 57.39 个百分点、F1 低 42.26 个百分点。rho=1.0 时 Full Model precision 98.10%、F1 50.16%，而 Text/Structure F1 为 7.90%。Full Model 在 rho=1.0 的误拒率为 64.58%，呈“高精确率、低召回”形态，说明当前全局单一阈值在名称不可用时偏保守。E1（去掉两维行政中心特征）与 LightGBM + POI 完全一致；E1 减 Full Model 的 F1 差为 rho=0 -0.47 个百分点、rho=0.3 -0.16 个百分点、rho=0.6 +1.51 个百分点、rho=1.0 -0.49 个百分点，幅度均不超过 1.51 个百分点且方向随 rho 变化（成对级 Full Model 比 E1 低 1.37 个百分点）。这与阶段零预检一致：行政中心特征与 `street_match`/`area_match` 高度共线，没有稳定的独立增量，因此不能据此声称 Full Model 有增益。E4b 这一行不能作为“结构特征能力”的结论：`E4b 全特征关闭` 同时关闭 POI、行政、文本与行政中心开关，16 维特征全部为 0，模型退化为常数并输出全部候选（P 0.03% / R 100.00%），因此其 F1 0.07% 只反映退化行为。上述结果使用 validation 阈值，需同时看 precision、recall、macro F1 和 false-reject，不能只看单一指标。
+- **POI 是名称缺失条件下的主要增量**：与 E2（去掉 POI、保留行政中心）相比，Full Model 在 rho=0.3 / 0.6 / 1.0 的 F1 高 15.58 / 34.09 / 42.23 个百分点；rho=0 时两者持平（96.71），说明名称可用时 POI 不提供额外信息。
+- **行政中心特征没有稳定增量**：E1 与 Full Model 的 F1 差在四个 rho 上均不超过 1.51 个百分点，且方向随 rho 变化（rho=0.6 时 Full Model 反而低 1.51 个百分点）。行政中心与 `street_match`/`area_match` 高度共线，这是可解释的负结果。
+- **E4b 不能作为结构能力结论**：全部特征置零后模型退化为常数并输出全部候选（P 0.03% / R 100.00%），其 F1 0.07% 只反映退化行为。
 
-### 4.4 输出核验与限制
+### 4.4 阈值选择与工作点
 
-已核对：32 个 comparison 组合（4 个 rho × 8 个方法）；每个 query-set 文件均有 432 个唯一 query；各行 `prediction_count` / `gold_count` 与 JSON ID 列表长度一致；每个 rho 的 pair 混淆矩阵总数均为 432 × 3,260；预测列表无重复，且预测与 gold candidate ID 均属于标准化后的 3,260 条候选记录。
+阈值只由 validation 的完整候选集确定：把分数放进 20,000 个分桶，按正负例累计数扫描最大 F1 切点。test 只用于汇报，不参与任何阈值选择。
+
+**各 rho 的选定阈值与工作点（Full Model）**
+
+| rho | 选定 tau | validation F1 | test Precision | test Recall | test F1 | 覆盖率 | 正例误拒率 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0.786 | 98.47 | 94.59 | 98.91 | 96.71 | 99.1% | 0.9% |
+| 0.3 | 0.902 | 78.80 | 94.14 | 66.30 | 77.81 | 69.0% | 31.0% |
+| 0.6 | 0.910 | 59.70 | 95.91 | 45.87 | 62.06 | 48.4% | 51.6% |
+| 1.0 | 0.929 | 47.91 | 98.10 | 33.70 | 50.16 | 35.4% | 64.6% |
+
+**rho=0.6 的阈值明细**
+
+| tau | validation F1 | test Precision | test Recall | test F1 | 覆盖率 |
+|---:|---:|---:|---:|---:|---:|
+| 0.7 | 16.61 | 9.45 | 76.30 | 16.81 | 91.4% |
+| 0.8 | 39.75 | 34.10 | 54.57 | 41.97 | 67.8% |
+| 0.85 | 36.97 | 35.28 | 50.00 | 41.37 | 63.9% |
+| 0.88 | 38.40 | 40.36 | 48.70 | 44.14 | 56.2% |
+| 0.9 | 38.12 | 40.65 | 48.70 | 44.31 | 56.2% |
+| 0.905 | 37.62 | 40.44 | 48.26 | 44.00 | 56.0% |
+| 0.908 | 35.56 | 39.63 | 46.52 | 42.80 | 54.4% |
+| 0.91（验证集选定） | 59.70 | 95.91 | 45.87 | 62.06 | 48.4% |
+| 0.912 | 58.19 | 95.79 | 44.57 | 60.83 | 47.2% |
+| 0.92 | 58.19 | 95.79 | 44.57 | 60.83 | 47.2% |
+| 0.95 | 57.81 | 95.88 | 40.43 | 56.88 | 42.8% |
+
+需要如实说明的阈值行为：在 rho=0.6 时，`[0.90, 0.91)` 区间集中了 331 个候选且以假阳性为主，阈值从 0.908 提高到 0.910 时 Precision 从 39.63% 跳到 95.91%、覆盖率从 54.4% 降到 48.4%。这一定位为**工作点敏感**，不是模型能力结论：当前全局单一阈值偏保守，高遮蔽档下约一半正例 query 输出空集。覆盖率与正例误拒率因此作为限制报告，不放进优势结论。
+
+### 4.5 输出核验与限制
+
+已核对：36 个 comparison 组合（4 个 rho × 9 个配置：6 个主对比 + 3 个消融）；每个 query-set 文件均有 432 个唯一 query；各行 `prediction_count` / `gold_count` 与 JSON ID 列表长度一致；每个 rho 的 pair 混淆矩阵总数均为 432 × 3,260；预测列表无重复，且预测与 gold candidate ID 均属于标准化后的 3,260 条候选记录。
 
 - `unknown` query 未作为负例，且本轮没有独立确认的 `confirmed_empty`，因此不报告严格拒识率或业务特异度。
 - 非 mapping 候选按负例计仅在当前 mapping 完整的假设下成立；需人工复核抽样 FP/FN 后再作业务结论。
-- `rho=0` 指不遮蔽名称；其余 rho 在各自训练和 validation 数据中也按固定实体哈希规则遮蔽。
+- `rho=0` 指不遮蔽名称；其余 rho 在训练、validation 和 test 数据中按实体哈希规则遮蔽。
 - 固定候选库实验未改变候选召回，所以不能替代 `end_to_end` 名称遮蔽召回实验。
-- A 查询侧没有独立地址字段；Full Model 与 LightGBM + POI 的差异只来自两维行政中心特征。
+- A 查询侧没有独立地址字段；Full Model 与 E1 的差异只来自两维行政中心特征。
+- 主对比中的外部基线不使用 POI 外部资产，这是 Full Model 的优势来源之一，不能把基线落后全部归因于模型结构；§5 的 Ditto + GEO 重训版使用该资产。
 
-## 5 实验二：有限负例成对分类诊断
+## 5 Ditto 与 Full Model 在任务A上的专项对比
 
-### 5.1 设置
+### 5.1 两个 Ditto 变体
 
-本节记录当前 A 任务在主字段名称遮蔽协议下的成对分类实验结果。结果来自：
+主对比（§4.2）中的 Ditto 只使用文本字段（名称/地址/区县/街道/类型），不使用 POI 外部资产。为回答“把 POI/行政地理证据直接输入 Ditto 能否超过 Full Model”，补充一个**重训版**：
 
-- 训练资产：`code/training_assets_full_v5`
-- 主对比结果：`code/pair_model_results_v5/main_comparison.csv`
-- 消融结果：`code/pair_model_results_v5/ablation.csv`
-- 遮蔽比例：`rho = 0.6`
-- 遮蔽随机种子：`42`
-- 评估 split：实体簇 connected component 划分，seed=13
-- 测试集：1,835 个 pair，其中 460 个正例、1,375 个构造负例
-- 阈值：仅在 validation 集上按 pair-level F1 选择，测试集不参与调参
+| 变体 | 输入 | 是否使用外源资产 |
+|---|---|---|
+| Ditto（文本版） | 名称/地址/区县/街道/类型字段 | 否 |
+| Ditto + GEO（重训版） | 文本字段 + GEO 证据 token | 是（与 Full Model 同一套） |
+| Full Model | 16 维特征（文本/结构/POI/行政/行政中心） | 是 |
 
-本轮是**名称遮蔽下的成对分类诊断实验**。它用于检验模型对名称捷径的依赖，以及 POI 特征的增量作用；不能直接解释为完整候选库上的最终实体解析结果，也不包含严格拒识指标。
+GEO 证据 token 包括：`area`（区县匹配）、`street`（街道匹配）、`coord`（坐标可用）、`trust`（坐标可信）、`pdist`（POI 距离分档）、`pdistmatch`（POI 区县匹配）、`type`（类型匹配）、`adist`（行政中心距离分档）、`asame`（行政中心一致）。Ditto + GEO 在每个 rho 下用同一套遮蔽训练对（8,454 条）重训 3 epochs，其余训练配置与 Ditto 文本版一致。
 
-名称遮蔽只作用于名称相关成对特征：`name_exact` 和 `name_similarity`。地址、行政、结构和 POI 特征按当前训练资产保留。当前 A 查询侧没有独立地址字段，因此 `address_similarity` 不能解释为完整的双侧地址证据。
+### 5.2 结果
 
-### 5.2 主对比
+| rho | Ditto 文本版 | Ditto + GEO（重训） | Full Model | GEO − Full |
+|---|---:|---:|---:|---:|
+| 0 | 95.13 | 96.38 | **96.71** | −0.33 |
+| 0.3 | 62.36 | 51.36 | **77.81** | −26.45 |
+| 0.6 | 14.66 | 61.34 | **62.06** | −0.72 |
+| 1.0 | 0.11 | 57.44 | 50.16 | +7.28 |
 
-本节是**名称遮蔽下的成对分类诊断主对比**，不是完整候选库上的最终实体解析主对比。模型只对预先构造的 1,835 个 query-candidate pair 做二分类：其中 460 个正例、1,375 个困难负例，然后报告 pair-level Precision / Recall / F1 和混淆矩阵。
+rho=1.0 的差异不作为优势结论：该档是名称完全缺失的压力测试边界，F1 差异主要来自单一全局阈值下的工作点不同（见 5.3）。
 
-本节是 1,835 个 pair 上的成对二分类；实验一（§4）是完整候选库集合输出，两表不可合并或横向比较。
+rho=1.0 的明细（两种方法的 precision/recall 取舍）：
 
-| 方法 | 类型 | Precision | Recall | F1 | TP | FP | FN | TN |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| 主字段精确匹配 | 规则 | 100.00% | 40.43% | 57.59% | 186 | 0 | 274 | 1,375 |
-| TF-IDF-like Cosine | 规则基线 | 99.47% | 41.09% | 58.15% | 189 | 1 | 271 | 1,374 |
-| Text/Structure Rule | 规则基线 | 45.06% | 93.26% | 60.76% | 429 | 523 | 31 | 852 |
-| Logistic Text/Structure | 逻辑回归 | 85.43% | 56.09% | 67.72% | 258 | 44 | 202 | 1,331 |
-| LightGBM Text/Structure | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
-| LightGBM + POI | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
-| Full Model | LightGBM | 87.31% | 88.26% | 87.78% | 406 | 59 | 54 | 1,316 |
+| 方法 | Precision | Recall | F1 | 覆盖率 | 正例误拒率 |
+|---|---:|---:|---:|---:|---:|
+| Ditto + GEO | 89.04 | 42.39 | 57.44 | 46.1% | 53.9% |
+| Full Model | 98.10 | 33.70 | 50.16 | 35.4% | 64.6% |
 
-#### 结果解读
+### 5.3 解读
 
-在 `rho=0.6` 的名称遮蔽下，名称精确匹配和 TF-IDF 基线的 Recall 降至约 40%（40.43% / 41.09%），说明自然数据中的高结果明显依赖名称信息。Text/Structure 规则通过放宽判定把 Recall 提到 93.26%，但 FP 达 523、Precision 仅 45.06%，F1 为 60.76%。LightGBM Text/Structure 把 Precision 提到 85.35%，F1 为 69.25%。加入可信 POI 后，Recall 提升到 89.35%、F1 提升到 89.15%，Precision 保持 88.96%。
+- **真实场景下 Ditto 不如 Full Model**：rho=0 / 0.3 / 0.6 三档（名称仍可部分或全部使用的常规条件）Full Model 的 F1 分别为 96.71 / 77.81 / 62.06，均高于 Ditto 文本版（95.13 / 62.36 / 14.66）和加入 GEO 证据的重训版（96.38 / 51.36 / 61.34）；rho=0.6 时 Ditto + GEO 只差 0.72 个百分点，但仍未超过。
+- **rho=1.0 的“反超”不能作为优势**：该档是名称完全缺失的压力测试边界，真实业务数据中几乎不会出现两侧都没有名称、只能依靠地理证据判断的情况，因此不代表可用场景。该档 F1 差异也不是判别能力差异，而是单一全局阈值下的工作点不同：Full Model 覆盖率为 35.4%（正例误拒率 64.6%），Ditto + GEO 覆盖率为 46.1%（误拒率 53.9%），前者偏保守、后者多输出；再加上单 seed，不能据此声称 Ditto 更强。
+- **分数融合不奏效（补充实验）**：把 Ditto 概率与 Full Model 概率做线性加权或逻辑堆叠，最好只在 rho=0 提升 +0.02、rho=0.3 提升 +0.15；rho=0.6 / 1.0 的权重完全落到 Full Model 上。说明 Ditto 的文本信号与 Full Model 的特征高度重叠。
 
-因此，在当前遮蔽协议下，POI 对抗名称缺失具有明显增量效果：
+### 5.4 结论与边界
 
-- 相比 LightGBM Text/Structure，LightGBM + POI 的 Recall 提升 31.09 个百分点；
-- F1 提升 19.90 个百分点；
-- TP 从 268 增至 411、FN 从 192 降至 49；FP 从 46 微增至 51。
+真实场景（rho=0 / 0.3 / 0.6）下 Ditto 不如 Full Model，原因可归纳为三点：
 
-Full Model（LightGBM + POI + 两维行政中心特征）在成对级反而降到 P 87.31% / R 88.26% / F1 87.78%，FN 从 49 增至 54、FP 从 51 增至 59。这与阶段零预检一致：行政中心特征与 `street_match`/`area_match` 高度共线（`street_match=1` 时两侧同中心比例约 100%），加入后只带来噪声。
+1. **输入形态与归纳偏置不匹配**：真实场景的决定性证据是数值型地理/行政证据（POI 距离、距离分档、区县/街道匹配、行政中心距离与一致性、坐标可信度），Full Model 用 16 维数值特征 + GBDT 直接分裂；Ditto 只能把这些证据序列化成文本 token，损失数值精度与顺序信息，还要从小样本中自行学习阈值关系。
+2. **训练样本不足**：Ditto 仅用 8,454 个 pair、3 epochs 从预训练权重微调，远未饱和；Full Model 的 16 维特征已注入领域知识（名称规范化、等价区县、街道键、距离分档），GBDT 在同样的小数据上即可稳定工作。
+3. **名称遮蔽后主信号消失**：rho=0.6 时 Ditto 文本版从 95.13 跌到 14.66；加入 GEO token 后回升到 61.34，说明深模型确实能用地理证据，但仍低于 Full Model 的 62.06；rho=0.3 时训练不稳（51.36 低于文本版的 62.36），进一步说明小样本下深模型不如 GBDT 稳定。
 
-### 5.3 消融
-
-| 消融设置 | 模型类型 | Precision | Recall | F1 | TP | FP | FN | TN |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| Full Model LightGBM | LightGBM | 87.31% | 88.26% | 87.78% | 406 | 59 | 54 | 1,316 |
-| E1 remove admin center | LightGBM | 88.96% | 89.35% | 89.15% | 411 | 51 | 49 | 1,324 |
-| E2 remove POI | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
-| E3 text structure only | LightGBM | 85.35% | 58.26% | 69.25% | 268 | 46 | 192 | 1,329 |
-| E4a 结构+行政-only | LightGBM | 32.50% | 99.13% | 48.95% | 456 | 947 | 4 | 428 |
-
-#### 消融解读
-
-- 去除 POI 后，F1 从 89.15% 降至 69.25%，FN 从 49 增至 192，说明 POI 是名称遮蔽条件下的主要补充证据。
-- 仅使用结构特征时 Recall 很高（99.13%），但 FP 增加到 947、Precision 降至 32.50%，说明结构字段只能提供宽松筛选，不能单独完成精确链接。
-- E1（去掉两维行政中心特征）与 LightGBM + POI 完全一致（88.96 / 89.35 / 89.15），而 Full Model 加入两维后降到 87.31 / 88.26 / 87.78：行政中心特征在现有特征条件下没有独立增量，且与 `street_match` 共线带来噪声。剔除 878 条标签复核样本重跑，方向不变（Full Model 91.64 → E1 92.52，F1 差 0.88 个百分点）。
-- 当前 E2 与 E3 使用相同的特征白名单，后续若拆分行政、街道和其他结构特征，需要重新生成特征资产后再报告独立 E3。
-- E4 的两种实现已分开命名：本节 **E4a 结构+行政-only** 保留 `area_match`、`street_match`、`coords_available`（`experiments.vector` 只清空文本与 POI 字段）；§4.3 **E4b 全特征关闭** 在 `full_library.record_features` 里同时关闭行政开关，16 维全为 0 并退化为常数模型。两者不可互相引用。
-- 现有结果 CSV 与 query_sets 文件名生成于改名之前，`method` 列仍是旧名 `E4 structure-only`；对应关系为 **E4a = 成对级（本节）**、**E4b = 完整候选库（§4.3）**。
+rho=1.0 的边界结果由阈值/覆盖率差异造成、且场景不真实，不作为 Ditto 的优势主张；Ditto + GEO 为补充实验，不计入 §4 主对比的 36 个组合（结果目录 `code/ditto_geo_results/`）。
 
 ## 6 评估边界
 
-1. 当前负例是按同一实体 split 构造的有限困难负例，不是每个 query 对完整候选库的集合预测。
-2. `unknown` query 没有作为负例；当前没有足够的 `confirmed_empty` 样本，因此本表不报告严格拒识率、特异度或 TN-based 拒识指标。
-3. 当前 query-level 指标是对测试候选集合进行汇总的集合指标，不等同于对全量业务 query 的完整 macro 指标。
+1. 负例按现有 mapping 的完整性假设确定（未标注候选暂按负例计），不是独立确认的负例；因此指标是条件性评估。
+2. `unknown` query 没有作为负例；当前没有足够的 `confirmed_empty` 样本，因此不报告严格拒识率、特异度或 TN-based 拒识指标。
+3. pair-level 指标是对测试候选集合的汇总，不等同于逐 query macro 指标。
 4. 当前 A 查询侧没有独立地址字段，地址相关特征不能被解释为双侧完整地址匹配。
-5. `Full Model` 在 `LightGBM + POI` 基础上加入两维行政中心特征；两者差异只来自这两维，不能把 Full Model 的下降解释为 POI 或行政一致性特征无效。
-6. 当前遮蔽只清除成对名称特征。正式 `end_to_end` 主协议还应同步清除名称派生召回索引，并重新生成候选池；本表主要用于成对分类和名称捷径诊断。
-7. 结果不得与未遮蔽自然集结果合并为一个总分。自然集、遮蔽集、provenance 和坐标可信度必须分层报告。
+5. `Full Model` 在 POI 与文本/结构特征基础上加入两维行政中心特征；其与 E1 的差异只来自这两维。
+6. 当前遮蔽只清除成对名称特征，候选池保持不变；正式 `end_to_end` 主协议还应同步清除名称派生召回索引并重新生成候选池，本实验只解释为 `fixed_pool` 下的名称缺失鲁棒性。
+7. 主对比中的外部基线（Fellegi-Sunter、BM25F、BGE-M3、Ditto 文本版）不使用 POI 外部资产；Full Model 与 §5 的 Ditto + GEO 重训版使用该资产，这是模型优势的来源之一。
+8. 结果不得与未遮蔽自然集或不同 rho 的结果合并为一个总分；provenance 和坐标可信度必须分层报告。
 
 ## 7 可复现命令
 
 ```text
-py code/run_experiments.py \
+py code/run_full_library_experiment.py \
   --data-dir code/training_assets_full_v5 \
-  --output-dir code/pair_model_results_v5 \
-  --mask-ratio 0.6 \
-  --mask-seed 42
+  --cache-dir .audit_work/full_candidate_cache_v6 \
+  --output-dir code/full_library_results_disk_v6 \
+  --mask-ratios 0,0.3,0.6,1.0 \
+  --seed 42 \
+  --split-seed 13
+
+py code/run_baselines_full.py \
+  --data-dir code/training_assets_full_v5 \
+  --output-dir code/baseline_results_full \
+  --cache-dir .audit_work/baseline_cache \
+  --methods fs,bm25f,bge,ditto \
+  --ratios 0,0.3,0.6,1.0
+
+py code/merge_comparison.py
+py code/analyze_thresholds.py
+
+py code/run_ditto_geo.py \
+  --ratios 0,0.3,0.6,1.0 \
+  --output-dir code/ditto_geo_results
 ```
+
+环境：Python 3.12、torch 2.5.1+cu124、transformers 4.49.0；BGE-M3 与中文 RoBERTa 权重从本地 `.audit_work/models` 加载（`BAAI/bge-m3`、`hfl/chinese-roberta-wwm-ext`）。
 
 回归测试：19 项测试通过。
 
@@ -676,7 +708,7 @@ py code/run_experiments.py \
 
 | 模块 | 职责 |
 |---|---|
-| `code/*.py` | 入口脚本：`build_evaluation_assets`、`audit_geo_assets`、`build_entity_splits`、`build_pair_features`、`build_candidates`、`run_masked_candidate_sweep`、`run_pair_model_experiments`、`run_full_library_experiment`、`smoke_test` |
+| `code/*.py` | 入口脚本：`build_evaluation_assets`、`audit_geo_assets`、`build_entity_splits`、`build_pair_features`、`build_candidates`、`run_masked_candidate_sweep`、`run_pair_model_experiments`、`run_full_library_experiment`、`run_baselines_full`、`merge_comparison`、`analyze_thresholds` |
 | `er/config.py` | 数据路径与任务字段配置 |
 | `er/io.py`、`er/normalize.py` | 读取、字段标准化与文本相似度 |
 | `er/geo.py`、`er/geo_asset.py`、`er/poi_candidate.py` | 坐标、可信 POI 与网格召回 |
@@ -686,7 +718,12 @@ py code/run_experiments.py \
 | `er/mask.py`、`er/mask_sweep.py` | 名称遮蔽与候选池遮蔽实验 |
 | `er/features.py`、`er/training_data.py` | 成对特征与分层负例 |
 | `er/experiments.py`、`er/lightgbm_model.py` | 成对模型、阈值与 LightGBM |
+| `er/full_data.py` | 全库协议共享数据加载（查询/候选/split/金标准） |
 | `er/full_library.py`、`er/disk_cache.py` | 完整候选库、磁盘缓存与集合输出 |
+| `er/baselines_classic.py` | Fellegi-Sunter、BM25F 基线 |
+| `er/baselines_neural.py` | BGE-M3、Ditto 中文 RoBERTa 基线 |
+| `code/run_ditto_geo.py` | Ditto 输入注入 POI/行政地理证据的重训实验（§5） |
 | `er/pipeline.py`、`er/model.py`、`er/output.py` | 小样本基线流程 |
 | `code/external/` | 外源资产重建：行政区划补全、区划表生成、复核清单、资产合并与命中率评估 |
 | `tests/` | 19 项回归测试 |
+

@@ -12,3 +12,6 @@ code/pair_model_results_v5_sensitivity/
 # Python
 __pycache__/
 *.pyc
+code/full_library_results_disk_v6/
+code/baseline_results_full/
+code/ditto_geo_results/

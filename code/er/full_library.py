@@ -362,12 +362,9 @@ def run_full_library(
     data_fingerprint = fingerprint.hexdigest()
     methods = [
         ("主字段精确匹配", False, False, True, False, "exact"),
-        ("TF-IDF-like Cosine", False, False, True, False, "tfidf"),
-        ("LightGBM Text/Structure", False, True, True, False, None),
-        ("LightGBM + POI", True, True, True, False, None),
         ("Full Model", True, True, True, True, None),
         ("E1 remove admin center", True, True, True, False, None),
-        ("E2 remove POI", False, True, True, False, None),
+        ("E2 remove POI", False, True, True, True, None),
         ("E4b 全特征关闭", False, False, False, False, None),
     ]
 
